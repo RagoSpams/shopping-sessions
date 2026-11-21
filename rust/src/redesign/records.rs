@@ -1,4 +1,5 @@
 use crate::buckets::{self, IDS, Partitions, Runs, USERS, bucket};
+use crate::calendar::Calendar;
 use crate::key::PackedKey;
 use crate::scan::rows;
 use ahash::RandomState;
@@ -8,7 +9,7 @@ use rayon::prelude::*;
 use shopping_sessions::aggregate::{Click, Event};
 use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::csv::Location;
-use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window, bounded_uint, calendar_ms};
+use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window, bounded_uint};
 use std::ops::Range;
 
 // A structurally valid row keeps its place in the index even with invalid values.
@@ -65,13 +66,14 @@ pub fn parse_events(
         || buckets::empty(IDS),
         |out, i| {
             let chunk = &chunks[i];
+            let mut calendar = Calendar::new();
             for (_, [id, user, ts, ingest, kind, product, price]) in rows::<7>(chunk) {
                 if id.is_empty() {
                     continue;
                 }
                 let id = PackedKey::new(id, chunk, i);
                 // The rules guarantee a valid UTC whole-second ingest timestamp.
-                let ingest = calendar_ms(ingest).expect("invalid ingest timestamp");
+                let ingest = calendar.read(ingest).expect("invalid ingest timestamp");
                 let (price, category, valid_kind) = match kind {
                     b"view" | b"cart" => (0, 0, true),
                     b"purchase" => {
@@ -89,7 +91,7 @@ pub fn parse_events(
                     _ => (0, 0, false),
                 };
                 let time = if valid_kind && !user.is_empty() && !product.is_empty() {
-                    window.timestamp(ts).unwrap_or(INVALID)
+                    calendar.timestamp(window, ts).unwrap_or(INVALID)
                 } else {
                     INVALID
                 };
@@ -125,6 +127,7 @@ pub fn parse_clicks(
         || buckets::empty(IDS),
         |out, i| {
             let chunk = &chunks[i];
+            let mut calendar = Calendar::new();
             for (offset, [id, user, campaign, ts]) in rows::<4>(chunk) {
                 if id.is_empty() {
                     continue;
@@ -132,7 +135,7 @@ pub fn parse_clicks(
                 let id = PackedKey::new(id, chunk, i);
                 let campaign = campaigns.ids.get(campaign).copied().unwrap_or(0);
                 let time = if !user.is_empty() && campaign != 0 {
-                    window.timestamp(ts).unwrap_or(INVALID)
+                    calendar.timestamp(window, ts).unwrap_or(INVALID)
                 } else {
                     INVALID
                 };

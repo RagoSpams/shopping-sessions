@@ -231,3 +231,16 @@ Route validated identical-copy clicks straight to user partitions. Duplicate mul
 | directclick | 0.825 / 4.174 | 0.074 / 0.290 | 0.378 / 1.853 | 0.313 / 1.278 | 0.772 / 2.990 | 0.158 / 0.510 | 0.003 / 0.002 | 2.922 / 11.705 | 3.32 |
 
 **Reverted.** The initial five-pair wall median increased. A second five-pair series measured 3.089 → 3.027 s, but the pooled ten-run medians were 2.928 → 2.930 s. CPU medians were 11.828 → 11.508 s. The wall gate was unmet.
+
+### R3-CALENDAR
+
+Cache exact Gregorian date prefixes in 32 per-chunk slots, selected by day of month. Reuse the scalar date decoder on misses. Validate the entire time-of-day mask and convert decimal pairs in one word. F2 offsets and F3 window checks remain exact.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.630 / 4.621 | 0.045 / 0.289 | 0.381 / 2.735 | 0.210 / 1.433 | 0.420 / 2.797 | 0.094 / 0.554 | 0.001 / 0.002 | 1.967 / 12.780 | 3.36 |
+| calendar | 0.584 / 4.212 | 0.047 / 0.291 | 0.354 / 2.615 | 0.212 / 1.412 | 0.414 / 2.701 | 0.085 / 0.538 | 0.001 / 0.002 | 1.815 / 11.966 | 3.35 |
+
+**Kept.** Exhaustive single-byte mutations at every position in four date/offset examples matched the scalar parser, including leap-century cases and non-ASCII bytes. Native end-to-end and parse medians improved.
