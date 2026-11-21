@@ -525,3 +525,16 @@ The combined branch incorporates the other lane's packed-key and selective dedup
 | R3-OUT-27 | Pack `Event`, `Click` and `PersonRow` to four-byte alignment. Routed event rows shrink from 24 to 20 bytes and click rows from 32 to 24. Fields are only copied, never borrowed. | 36/36 and five MATCHes. All Rust unit tests passed. | Locked series of 8 and 10 pairs against R3-OUT-24: 1.000 vs 1.125 s and 1.035 vs 1.060 s end to end. Resolve fell from 0.147 to 0.122 s and from 0.146 to 0.124 s. Aggregate start to exit was 0.203 vs 0.203 s and 0.199 vs 0.207 s. | Kept |
 | R3-OUT-M5 | Integrate the input lane's in-place user-partition resolve (`e536a5b`). Its conversion requires `Record<T>` and `PersonRow<T>` to have equal size and alignment, so this merge drops R3-OUT-27's four-byte packing. Most of that packing's gain came from routed-row traffic, and the new resolve no longer routes most rows. | 36/36 and five MATCHes. All Rust unit tests passed. | See the paired timing below. | Kept |
 | R3-OUT-28 | Defer per-session campaign-session and assist increments into 16K-entry cell-index logs, and apply each log in a tight batch. A diagnostic that skipped the per-session session-cell update saved 0.12 CPU-s (0.017 s wall), so the update stalls. | 36/36 and five MATCHes, on both 8c520f7 and the merged 125f3eb | Locked 8 pairs on 8c520f7: aggregate 0.205 vs 0.212 s, aggregate start to exit 0.222 vs 0.226 s (mean 0.253 vs 0.230). Locked 10 pairs on 125f3eb under host load near 5: 0.299 vs 0.306 s; aggregate CPU 2.126 vs 2.155 s; end to end 1.475 vs 1.425 s. | Reverted |
+
+### R3-PACKED
+
+Parse each event straight into the aggregate's sortable word (window-relative millisecond, category, price) when the window and catalog fit; a full price field marks a row that cannot survive, and wider inputs keep full-width rows. Dedup tickets shrink to the exact ID plus one word that holds the ingest second above the row slot. Event rows and tickets fall from 24 + 24 to 16 + 16 bytes, and resolution rewrites the 16-byte rows in place.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| merged | 0.688 / 4.645 | 0.063 / 0.385 | 0.102 / 0.716 | 0.153 / 1.186 | 0.242 / 1.874 | 0.001 / 0.001 | 0.007 / 0.009 | 1.287 / 8.927 | 3.14 |
+| pk16 | 0.605 / 4.202 | 0.068 / 0.472 | 0.105 / 0.746 | 0.130 / 1.008 | 0.228 / 1.763 | 0.002 / 0.002 | 0.006 / 0.008 | 1.175 / 8.316 | 2.85 |
+
+**Kept.** All five pairs favored the packed build (1.175 vs 1.287 s median); system CPU fell from 1.911 to 1.162 s and peak RSS from 3.14 to 2.85 GiB. Both builds also matched the frozen oracle on three edge sets derived from s2-200k: a 400-year window and a 1,000-category catalog (full-width path), and a 49.7-day window ending 296 ms short of the 32-bit offset limit (packed path).

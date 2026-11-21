@@ -13,7 +13,9 @@ use memmap2::UncheckedAdvice;
 use shopping_sessions::catalog::{Campaigns, Products, load_window, path};
 use shopping_sessions::csv::read_chunks;
 use shopping_sessions::time::{LOOKBACK_MS, Window};
+use memmap2::Mmap;
 use std::error::Error;
+use std::path::Path;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use timing::{Stage, Timings};
@@ -55,29 +57,76 @@ fn main() -> Result<(), Box<dyn Error>> {
     let directory = links::build(link_batch, &chunks);
     timer.end(Stage::Links);
 
+    let inputs = Inputs {
+        chunks: &chunks,
+        links_end,
+        events_end,
+        hash: &hash,
+        window,
+        products: &products,
+        campaigns: &campaigns,
+        output: &output,
+    };
+    // Events travel as one sortable word whenever the window and catalog fit.
+    if records::PackedEvent::fits(window, products.categories.len()) {
+        run::<records::PackedEvent>(inputs, directory, &mut timer)?;
+    } else {
+        run::<shopping_sessions::aggregate::Event>(inputs, directory, &mut timer)?;
+    }
+    timer.print();
+    // All writers have closed. The OS reclaims the remaining workspaces at exit.
+    std::process::exit(0);
+}
+
+struct Inputs<'a> {
+    chunks: &'a [Mmap],
+    links_end: usize,
+    events_end: usize,
+    hash: &'a RandomState,
+    window: Window,
+    products: &'a Products,
+    campaigns: &'a Campaigns,
+    output: &'a Path,
+}
+
+fn run<E: records::EventCodec + tables::EventRows>(
+    inputs: Inputs<'_>,
+    directory: Vec<links::Directory>,
+    timer: &mut Timings,
+) -> Result<(), Box<dyn Error>> {
+    let Inputs {
+        chunks,
+        links_end,
+        events_end,
+        hash,
+        window,
+        products,
+        campaigns,
+        output,
+    } = inputs;
     // Retiring the event dedup index before building the click index also
     // bounds peak working memory on the 60M workload.
     let event_index =
-        records::parse_events(&chunks, links_end..events_end, &hash, window, &products);
+        records::parse_events::<E>(chunks, links_end..events_end, hash, window, products);
     timer.end(Stage::Parse);
-    let events = records::dedup(event_index, &chunks);
+    let events = records::dedup(event_index, hash, chunks);
     timer.end(Stage::Dedup);
     let clicks_window = Window {
         start: window.start - LOOKBACK_MS,
         end: window.end,
     };
     let click_index = records::parse_clicks(
-        &chunks,
+        chunks,
         events_end..chunks.len(),
-        &hash,
+        hash,
         clicks_window,
-        &campaigns,
+        campaigns,
     );
     timer.end(Stage::Parse);
-    let clicks = records::dedup(click_index, &chunks);
+    let clicks = records::dedup(click_index, hash, chunks);
     timer.end(Stage::Dedup);
 
-    let people = links::resolve(directory, events, clicks, &hash, &chunks);
+    let people = links::resolve(directory, events, clicks, hash, chunks);
     timer.end(Stage::Resolve);
     let user_dir = output.join("user_daily");
     let campaign_dir = output.join("campaign_daily");
@@ -101,9 +150,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         &people.names,
         people.events,
         people.clicks,
-        &chunks,
-        &products,
-        &campaigns,
+        chunks,
+        products,
+        campaigns,
         window,
         &user_dir,
         &release,
@@ -111,7 +160,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     timer.end(Stage::Aggregate);
     tables::write_campaigns(&campaign_dir.join("part-0.parquet"), &daily)?;
     timer.end(Stage::Write);
-    timer.print();
-    // All writers have closed. The OS reclaims the remaining workspaces at exit.
-    std::process::exit(0);
+    Ok(())
 }

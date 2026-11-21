@@ -1,5 +1,6 @@
 use crate::buckets::{Partitions, USERS};
 use crate::key::Key;
+use crate::records::PackedEvent;
 use memmap2::Mmap;
 use parquet::errors::Result;
 use rayon::prelude::*;
@@ -14,7 +15,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use shopping_sessions::output::CampaignDay;
-use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window};
+use shopping_sessions::time::{DAY_MS, Window};
 
 // Limit scratch per worker for long windows or large campaign catalogs.
 enum Totals {
@@ -225,6 +226,45 @@ fn sort_packed_events(rows: &mut [u64], scratch: &mut Vec<u64>) {
     }
 }
 
+/// Event payloads from resolution and the form each person's history is
+/// sorted in. Packed words sort by their timestamp bytes; full rows by time.
+pub trait EventRows: Copy + Send + Sync {
+    type Sorted: Copy + Send;
+    fn sorted(self) -> Self::Sorted;
+    fn sort(rows: &mut [Self::Sorted], scratch: &mut Vec<u64>);
+    fn event(row: &Self::Sorted, window: Window) -> Event;
+}
+
+impl EventRows for PackedEvent {
+    type Sorted = u64;
+    #[inline]
+    fn sorted(self) -> u64 {
+        self.0
+    }
+    fn sort(rows: &mut [u64], scratch: &mut Vec<u64>) {
+        sort_packed_events(rows, scratch);
+    }
+    #[inline]
+    fn event(row: &u64, window: Window) -> Event {
+        PackedEvent(*row).decode(window)
+    }
+}
+
+impl EventRows for Event {
+    type Sorted = Event;
+    #[inline]
+    fn sorted(self) -> Event {
+        self
+    }
+    fn sort(rows: &mut [Event], _: &mut Vec<u64>) {
+        rows.sort_unstable_by_key(|event| event.time);
+    }
+    #[inline]
+    fn event(row: &Event, _: Window) -> Event {
+        *row
+    }
+}
+
 // Person IDs are dense indices into this shard's name vector. Count their
 // rows first so each person has a contiguous range for the timestamp sort.
 fn order_people<T, U: Copy>(
@@ -293,9 +333,9 @@ fn process_groups<T>(
 /// Each worker writes its own user file as soon as its shards finish, then
 /// calls `release` while other workers may still be aggregating.
 #[allow(clippy::too_many_arguments)]
-pub fn aggregate(
+pub fn aggregate<E: EventRows>(
     names: &[Vec<Key>],
-    events: Partitions<PersonRow<Event>>,
+    events: Partitions<PersonRow<E>>,
     clicks: Partitions<PersonRow<Click>>,
     chunks: &[Mmap],
     products: &Products,
@@ -304,12 +344,6 @@ pub fn aggregate(
     user_dir: &Path,
     release: &(impl Fn() + Sync),
 ) -> Result<CampaignColumns> {
-    const PRICE_BITS: u32 = (MAX_PRICE_CENTS as u32).ilog2() + 1;
-    const PRICE_MASK: u32 = (1 << PRICE_BITS) - 1;
-    // A compact event holds the exact window-relative millisecond and payload.
-    // Wider catalogs or windows keep the full timestamp and category fields.
-    let can_pack = window.end - window.start <= i64::from(u32::MAX) + 1
-        && products.categories.len() <= (1 << (32 - PRICE_BITS));
     let parallelism = rayon::current_num_threads().min(USERS);
     // Workers claim the largest remaining shard first to balance the finish.
     let mut order: Vec<_> = (0..events.len()).collect();
@@ -363,47 +397,18 @@ pub fn aggregate(
                     }
                     Ok(())
                 };
-                if can_pack {
-                    let events = order_people(
-                        events,
-                        people,
-                        |event| {
-                            let time = (event.time - window.start) as u64;
-                            let payload = (event.category << PRICE_BITS) | event.price;
-                            (time << 32) | u64::from(payload)
-                        },
-                        |rows| sort_packed_events(rows, &mut sort_scratch),
-                    );
-                    process_groups(
-                        &events,
-                        &clicks,
-                        |&key| Event {
-                            time: window.start + (key >> 32) as i64,
-                            price: (key as u32) & PRICE_MASK,
-                            category: (key as u32) >> PRICE_BITS,
-                        },
-                        &mut user_day,
-                        &mut attribution,
-                        &mut totals,
-                        &mut emit,
-                    )?;
-                } else {
-                    let events = order_people(
-                        events,
-                        people,
-                        |e| e,
-                        |rows| rows.sort_unstable_by_key(|e| e.time),
-                    );
-                    process_groups(
-                        &events,
-                        &clicks,
-                        |e| *e,
-                        &mut user_day,
-                        &mut attribution,
-                        &mut totals,
-                        &mut emit,
-                    )?;
-                }
+                let events = order_people(events, people, E::sorted, |rows| {
+                    E::sort(rows, &mut sort_scratch)
+                });
+                process_groups(
+                    &events,
+                    &clicks,
+                    |row| E::event(row, window),
+                    &mut user_day,
+                    &mut attribution,
+                    &mut totals,
+                    &mut emit,
+                )?;
             }
             write_users(&user_dir.join(format!("part-{part}.parquet")), &daily)?;
             drop(daily);
