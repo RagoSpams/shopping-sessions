@@ -28,3 +28,26 @@ The Docker runs used the scorer flags and the requested 24 GiB container limit o
 | ID | Change | Correctness result | Runtime | Kept or reverted |
 | --- | --- | --- | --- | --- |
 | D04 | Materialize typed events before validation to avoid recomputing field splits and timestamp conversions | 36/36 fixtures, dev, s2-200k, s3-3m, s4-10m, s5-20m MATCH | Dev 3.84 s median, 572,076 KiB peak RSS. s5-20m 57.81 s median, 5,848,988 KiB peak RSS | Kept |
+
+## Round 2 · separate partitioned binary
+
+Build the candidate with `docker build -f rust/Dockerfile.redesign -t shopping-redesign .`. The root image continues to run the shipped binary. For a native build, enable the `redesign` feature, select `--bin shopping-redesign` and use the static CRT and x86-64-v3 flags from the candidate Dockerfile.
+
+| ID | Change | Correctness | Local 20M median | Disposition |
+|---|---|---|---|---|
+| R2-M1 | Single CSV decode, exact inline or mapped keys, partition-local dedup and user lookup, parallel canonical union-find, person-owned session processing and plain Parquet fallback | 36/36 fixtures, dev, 200k, 3M, 10M and 20M both tables MATCH. PyArrow read every output file in these five datasets. Last timed native and Docker outputs also MATCH | Native 2.329 s and 15.60 CPU-s. Docker 3.063 s from invocation to return and 15.54 in-process CPU-s. Stock Step 0 controls were 5.336 s native and 6.254 s Docker | Kept alongside default |
+
+Native and Docker use the same static Rust 1.90 ELF. Hyperfine 2.0.0, five measured runs after one warmup, clean output before each, NCPU=8 and CPUs 0–7. Native CPU is process-lifetime user plus system time. Docker CPU is the application's process clock between entry and writer close. In-process stage times include work and deallocation performed before a stage ends. The remaining native wall interval includes static startup and kernel teardown after exit. In Docker that residual also includes client and daemon overhead.
+
+| 20M stage | Native wall budget | M1 native wall | M1 native CPU | M1 Docker wall | M1 Docker CPU |
+|---|---:|---:|---:|---:|---:|
+| Parse, map, dimensions and first scatter | 0.220 | 0.923 | 6.837 | 0.926 | 6.755 |
+| Link interning, union and canonical names | 0.030 | 0.042 | 0.262 | 0.038 | 0.248 |
+| ID dedup, validate, late, scatter by user | 0.070 | 0.456 | 3.259 | 0.469 | 3.308 |
+| Resolve users and scatter by person | 0.070 | 0.219 | 1.497 | 0.199 | 1.327 |
+| Person sort, sessions, credit, assists, aggregation | 0.100 | 0.465 | 3.126 | 0.473 | 3.175 |
+| Parquet fallback | 0.030 | 0.114 | 0.784 | 0.129 | 0.758 |
+| Startup and exit including pool setup | 0.020 | 0.145 | — | 0.802 | — |
+| **End to end** | **0.550 wall / 3.500 CPU** | **2.329** | **15.601** | **3.063** | **15.545** |
+
+M1 peak RSS at 20M was 3.82 GiB. Seed 6 at 60M took 22.52 s wall, 105.20 CPU-s and 9.49 GiB peak RSS. Both 60M tables matched the earlier validated Rust output, with 6,604,995 user/day and 28,014 campaign/day rows. That additional comparison is independent of the five frozen reference datasets.

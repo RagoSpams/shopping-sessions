@@ -34,9 +34,10 @@ const CAMPAIGN_SCHEMA: &str = "
 
 type Writer = SerializedFileWriter<BufWriter<File>>;
 
-fn writer(path: &Path, schema: &str) -> Result<Writer> {
+fn writer(path: &Path, schema: &str, plain: bool) -> Result<Writer> {
     let properties = WriterProperties::builder()
-        .set_compression(Compression::SNAPPY)
+        .set_compression(if plain { Compression::UNCOMPRESSED } else { Compression::SNAPPY })
+        .set_dictionary_enabled(!plain)
         .set_statistics_enabled(EnabledStatistics::None)
         .build();
     SerializedFileWriter::new(
@@ -71,8 +72,12 @@ pub struct UserWriter {
 
 impl UserWriter {
     pub fn new(path: &Path) -> Result<Self> {
+        Self::with_encoding(path, false)
+    }
+
+    pub fn with_encoding(path: &Path, plain: bool) -> Result<Self> {
         Ok(Self {
-            file: writer(path, USER_SCHEMA)?,
+            file: writer(path, USER_SCHEMA, plain)?,
             users: Vec::new(),
             days: Vec::new(),
             sessions: Vec::new(),
@@ -157,7 +162,15 @@ pub fn write_campaigns<'a>(
     path: &Path,
     rows: impl Iterator<Item = (&'a [u8], &'a [u8], i32, CampaignDay)>,
 ) -> Result<()> {
-    let mut writer = writer(path, CAMPAIGN_SCHEMA)?;
+    campaign_file(path, rows, false)
+}
+
+pub fn campaign_file<'a>(
+    path: &Path,
+    rows: impl Iterator<Item = (&'a [u8], &'a [u8], i32, CampaignDay)>,
+    plain: bool,
+) -> Result<()> {
+    let mut writer = writer(path, CAMPAIGN_SCHEMA, plain)?;
     let mut rows = rows.peekable();
     while rows.peek().is_some() {
         let mut campaigns = Vec::new();

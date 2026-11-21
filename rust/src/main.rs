@@ -1,90 +1,20 @@
-mod aggregate;
 mod input;
-mod output;
 mod people;
-mod time;
 
-use aggregate::{Attribution, CampaignDays, Click, Event};
-use ahash::AHashMap;
-use input::{SHARDS, after_header, csv, duplicate_rows, lines, parse_winners, read_parts, transpose};
-use output::{UserWriter, write_campaigns};
+use shopping_sessions::catalog::{Products, Campaigns, load_window, path};
+use shopping_sessions::aggregate::{self, Attribution, CampaignDays, Click, Event};
+use input::{SHARDS, duplicate_rows, parse_winners, read_parts, transpose};
+use shopping_sessions::output::{UserWriter, write_campaigns};
 use people::{Batch, Names, People};
 use rayon::prelude::*;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
-use time::{DAY_MS, LOOKBACK_MS, MAX_PRICE_CENTS, Window, bounded_uint, calendar_ms};
+use shopping_sessions::time::{DAY_MS, LOOKBACK_MS, MAX_PRICE_CENTS, Window, bounded_uint, calendar_ms};
 
 const OUTPUT_PARTS: usize = 32;
-const UNKNOWN: &[u8] = b"unknown";
-const ORGANIC: &[u8] = b"organic";
-
-type Strings = AHashMap<Box<[u8]>, Box<[u8]>>;
-
-fn read_dimension(path: &Path) -> io::Result<Strings> {
-    let contents = fs::read(path)?;
-    Ok(lines(after_header(&contents))
-        .filter_map(|(_, row)| csv::<2>(row))
-        .map(|[key, value]| (key.into(), value.into()))
-        .collect())
-}
-
-struct Products {
-    ids: AHashMap<Box<[u8]>, u32>,
-    categories: Vec<Box<[u8]>>,
-    unknown: u32,
-}
-
-impl Products {
-    fn read(path: &Path) -> io::Result<Self> {
-        let products = read_dimension(path)?;
-        let mut categories: Vec<_> = products.values().cloned().collect();
-        categories.push(UNKNOWN.into());
-        categories.sort_unstable();
-        categories.dedup();
-        let category = |name: &[u8]| {
-            let index = categories
-                .binary_search_by(|label| label.as_ref().cmp(name))
-                .unwrap();
-            u32::try_from(index).unwrap()
-        };
-        let ids = products
-            .into_iter()
-            .map(|(product, label)| (product, category(&label)))
-            .collect();
-        let unknown = category(UNKNOWN);
-        Ok(Self {
-            ids,
-            categories,
-            unknown,
-        })
-    }
-}
-
-struct Campaigns {
-    ids: AHashMap<Box<[u8]>, u32>,
-    values: Vec<(Box<[u8]>, Box<[u8]>)>,
-}
-
-impl Campaigns {
-    fn read(path: &Path) -> io::Result<Self> {
-        let values = read_dimension(path)?;
-        let mut ids = AHashMap::with_capacity(values.len());
-        let mut campaigns = vec![(ORGANIC.into(), ORGANIC.into())];
-        for (campaign, channel) in values {
-            ids.insert(campaign.clone(), u32::try_from(campaigns.len()).unwrap());
-            campaigns.push((campaign, channel));
-        }
-        Ok(Self {
-            ids,
-            values: campaigns,
-        })
-    }
-}
-
 fn event(
     [user, timestamp, ingest, kind, product, price]: [&[u8]; 6],
     window: Window,
@@ -115,24 +45,6 @@ fn event(
         time,
         price,
         category,
-    })
-}
-
-fn path(variable: &str, default: &str) -> PathBuf {
-    env::var_os(variable).map_or_else(|| PathBuf::from(default), PathBuf::from)
-}
-
-fn load_window(path: &Path) -> Result<Window, Box<dyn Error>> {
-    let manifest: serde_json::Value = serde_json::from_reader(fs::File::open(path)?)?;
-    let timestamp = |key: &str| {
-        manifest[key]
-            .as_str()
-            .and_then(|text| calendar_ms(text.as_bytes()))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("invalid {key}")))
-    };
-    Ok(Window {
-        start: timestamp("window_start")?,
-        end: timestamp("window_end")?,
     })
 }
 
@@ -237,9 +149,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                     writer = Some(UserWriter::new(&path)?);
                 }
                 aggregate::process(
-                    writer.as_mut().unwrap(),
-                    &names.strings,
-                    &products.categories,
+                    |person, day, sessions, events, revenue, top| {
+                        writer.as_mut().unwrap().push(
+                            &names.strings[person as usize], day, sessions, events, revenue,
+                            top.map(|c| products.categories[c as usize].as_ref()),
+                        )
+                    },
                     &events,
                     &clicks,
                     &mut attribution,

@@ -3,6 +3,7 @@ name = "shopping-sessions"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
+default-run = "shopping-sessions"
 
 [dependencies]
 ahash = "=0.8.12"
@@ -18,3 +19,11 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+[features]
+redesign = []
+
+[[bin]]
+name = "shopping-redesign"
+path = "src/redesign/main.rs"
+required-features = ["redesign"]

@@ -1,4 +1,6 @@
-use crate::input::{SHARDS, csv, lines, read_parts, shard};
+use crate::input::{SHARDS, read_parts, shard};
+use shopping_sessions::csv::{csv, lines};
+use shopping_sessions::aggregate::PersonRow;
 use ahash::{AHashMap, RandomState};
 use hashbrown::HashTable;
 use std::io;
@@ -140,11 +142,6 @@ fn join(components: &mut [Component<'_>], left: usize, right: usize) {
     components[right].parent = left;
     components[left].size += components[right].size;
     components[left].minimum = components[left].minimum.min(components[right].minimum);
-}
-
-pub struct PersonRow<T> {
-    pub person: u32,
-    pub data: T,
 }
 
 pub struct Partition<T> {

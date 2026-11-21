@@ -1,11 +1,16 @@
-use crate::input::Location;
-use crate::output::{CampaignDay, UserWriter};
-use crate::people::PersonRow;
+use crate::csv::Location;
+use crate::output::CampaignDay;
 use crate::time::{DAY_MS, LOOKBACK_MS, SESSION_GAP_MS};
 use ahash::AHashMap;
 use memmap2::Mmap;
 use parquet::errors::Result;
 
+pub struct PersonRow<T> {
+    pub person: u32,
+    pub data: T,
+}
+
+#[derive(Clone, Copy)]
 pub struct Event {
     pub time: i64,
     pub price: u32,
@@ -137,18 +142,17 @@ impl UserDay {
 
     fn write(
         &mut self,
-        writer: &mut UserWriter,
-        name: &[u8],
+        emit: &mut impl FnMut(u32, i32, i64, i64, i64, Option<u32>) -> Result<()>,
+        person: u32,
         day: i32,
-        categories: &[Box<[u8]>],
     ) -> Result<()> {
         let top = self
             .categories
             .iter()
             // Category IDs are assigned in ascending byte order.
             .min_by_key(|&&(category, revenue)| (-revenue, category))
-            .map(|&(category, _)| &*categories[category as usize]);
-        writer.push(name, day, self.sessions, self.events, self.revenue, top)?;
+            .map(|&(category, _)| category);
+        emit(person, day, self.sessions, self.events, self.revenue, top)?;
         self.sessions = 0;
         self.events = 0;
         self.revenue = 0;
@@ -158,9 +162,7 @@ impl UserDay {
 }
 
 pub fn process(
-    writer: &mut UserWriter,
-    names: &[Box<[u8]>],
-    categories: &[Box<[u8]>],
+    mut emit: impl FnMut(u32, i32, i64, i64, i64, Option<u32>) -> Result<()>,
     events: &[PersonRow<Event>],
     mut clicks: &[PersonRow<Click>],
     attribution: &mut Attribution<'_>,
@@ -169,7 +171,6 @@ pub fn process(
     let mut daily = UserDay::default();
     for mut events in events.chunk_by(|a, b| a.person == b.person) {
         let person = events[0].person;
-        let name = &names[person as usize];
         if clicks.first().is_some_and(|row| row.person < person) {
             clicks = &clicks[clicks.partition_point(|row| row.person < person)..];
         }
@@ -186,7 +187,7 @@ pub fn process(
             let start = first.data.time;
             let session_day = start.div_euclid(DAY_MS) as i32;
             if session_day != day {
-                daily.write(writer, name, day, categories)?;
+                daily.write(&mut emit, person, day)?;
                 day = session_day;
             }
             let mut previous = start;
@@ -211,7 +212,7 @@ pub fn process(
             attribution.credit(matched, start, day, revenue, campaign_days);
             events = &events[count..];
         }
-        daily.write(writer, name, day, categories)?;
+        daily.write(&mut emit, person, day)?;
     }
     Ok(())
 }
