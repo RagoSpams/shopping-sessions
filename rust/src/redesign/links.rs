@@ -245,24 +245,27 @@ impl Directory {
         let mut kept = 0;
         let mut start = 0;
         while start < len {
-            let end = (start + 32).min(len);
+            let count = (len - start).min(32);
             let mut hashes = [0u64; 32];
-            for (i, hash) in (start..end).zip(&mut hashes) {
+            let table = self.slots.as_ptr();
+            let mask = self.slots.len().wrapping_sub(1);
+            for k in 0..count {
                 // Every index below len holds an initialized record.
-                *hash = unsafe { &*records.add(i) }.user.hash(state, chunks);
+                let hash = unsafe { &*records.add(start + k) }.user.hash(state, chunks);
+                hashes[k] = hash;
                 #[cfg(target_arch = "x86_64")]
                 if !self.slots.is_empty() {
-                    let slot = *hash as usize & (self.slots.len() - 1);
                     // The slot belongs to the current table. A later grow can
                     // invalidate this hint but never the lookup below.
                     unsafe {
                         std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
-                            self.slots.as_ptr().add(slot).cast(),
+                            table.add(hash as usize & mask).cast(),
                         );
                     }
                 }
             }
-            for (i, &hash) in (start..end).zip(&hashes) {
+            for k in 0..count {
+                let (i, hash) = (start + k, hashes[k]);
                 // Record i is read before output slot kept <= i is written.
                 // Both types are plain data of equal size, so the write never
                 // reaches an unread record and the allocation keeps its layout.
@@ -282,7 +285,7 @@ impl Directory {
                     forwards[owner(root)].push(row);
                 }
             }
-            start = end;
+            start += count;
         }
         unsafe { Vec::from_raw_parts(people, kept, capacity) }
     }
@@ -294,7 +297,13 @@ impl Directory {
         state: &RandomState,
         chunks: &[Mmap],
     ) -> (Vec<Vec<PersonRow<T>>>, Vec<Vec<PersonRow<T>>>) {
-        let mut forwards = buckets::empty(USERS);
+        // About a third of rows belong to persons owned elsewhere. Reserving
+        // each list up front avoids repeated growth copies.
+        let total: usize = runs.iter().map(Vec::len).sum();
+        let reserve = total * 3 / 8 / USERS;
+        let mut forwards: Vec<Vec<_>> = (0..USERS)
+            .map(|owner| Vec::with_capacity(if owner == shard { 0 } else { reserve }))
+            .collect();
         let local = runs
             .into_iter()
             .filter(|run| !run.is_empty())

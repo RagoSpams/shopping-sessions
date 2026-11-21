@@ -604,3 +604,16 @@ Pre-create the event parse batches and let one helper thread map their pages wit
 Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `9c4f186`: parse 0.396 vs 0.435 s, system CPU 0.986 vs 1.197 s, end to end 0.803 vs 0.881 s.
 
 **Reverted.** On this host the helper's page provisioning competed with the workers and raised kernel time instead of replacing their faults. With the earlier input prefault (R3-POPREAD) and the jemalloc huge-page comparison, this exhausts the provisioning lever here; the kept reduction came from smaller rows (R3-PACKED).
+
+### R3-RESOLVE2
+
+Reserve each partition's forward lists for three eighths of its rows spread over the other owners, and run the prefetching resolve loop over plain indices with the table address hoisted per block.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| chunks | 0.429 / 3.347 | 0.053 / 0.312 | 0.091 / 0.636 | 0.103 / 0.800 | 0.182 / 1.442 | 0.001 / 0.001 | 0.005 / 0.007 | 0.924 / 6.847 | 2.82 |
+| resolve2 | 0.420 / 3.221 | 0.049 / 0.306 | 0.082 / 0.581 | 0.101 / 0.765 | 0.180 / 1.423 | 0.001 / 0.001 | 0.004 / 0.006 | 0.844 / 6.284 | 2.86 |
+
+**Kept.** Resolve CPU fell from 0.800 to 0.765 s and end to end from 0.924 to 0.844 s in five pairs on a busy host (screen: resolve 0.103 to 0.091 s, end to end 0.860 to 0.828 s).
