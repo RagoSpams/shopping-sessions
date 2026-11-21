@@ -20,6 +20,9 @@ enum Totals {
         first: i32,
         campaigns: usize,
         rows: Vec<CampaignDay>,
+        // Assist counts are the most frequent update. A separate day-major
+        // matrix keeps each session's increments within one compact row.
+        assists: Vec<i64>,
     },
     Sparse(CampaignDays),
 }
@@ -39,6 +42,7 @@ impl Totals {
                 rows: std::iter::repeat_with(CampaignDay::default)
                     .take(size)
                     .collect(),
+                assists: vec![0; size],
             }
         } else {
             Self::Sparse(CampaignDays::new())
@@ -51,8 +55,10 @@ impl Totals {
                 first,
                 campaigns,
                 rows,
+                assists,
             } => {
-                for (index, totals) in rows.into_iter().enumerate() {
+                for (index, (mut totals, assists)) in rows.into_iter().zip(assists).enumerate() {
+                    totals.assists += assists;
                     if totals.sessions != 0 || totals.assists != 0 {
                         let key = (
                             (index % campaigns) as u32,
@@ -79,8 +85,28 @@ impl CampaignTotals for Totals {
                 first,
                 campaigns,
                 rows,
+                ..
             } => &mut rows[(day - *first) as usize * *campaigns + campaign as usize],
             Self::Sparse(rows) => rows.daily(campaign, day),
+        }
+    }
+
+    #[inline]
+    fn assist(&mut self, ids: &[u32], day: i32) {
+        match self {
+            Self::Dense {
+                first,
+                campaigns,
+                assists,
+                ..
+            } => {
+                let start = (day - *first) as usize * *campaigns;
+                let row = &mut assists[start..start + *campaigns];
+                for &id in ids {
+                    row[id as usize] += 1;
+                }
+            }
+            Self::Sparse(rows) => rows.assist(ids, day),
         }
     }
 }

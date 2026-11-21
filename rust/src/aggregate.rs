@@ -35,6 +35,13 @@ pub type CampaignDays = AHashMap<(u32, i32), CampaignDay>;
 
 pub trait CampaignTotals {
     fn daily(&mut self, campaign: u32, day: i32) -> &mut CampaignDay;
+
+    /// Count one assisted session for each listed campaign on `day`.
+    fn assist(&mut self, campaigns: &[u32], day: i32) {
+        for &id in campaigns {
+            self.daily(id, day).assists += 1;
+        }
+    }
 }
 
 impl CampaignTotals for CampaignDays {
@@ -127,17 +134,18 @@ impl<'a> Attribution<'a> {
         totals.purchasing += i64::from(revenue > 0);
         totals.revenue += revenue;
         // A campaign's most recent eligible click determines whether any
-        // click from it assists. Expire entries while counting that session.
+        // click from it assists. Expire entries, then count the session.
+        let last_by_campaign = &mut self.last_by_campaign;
         self.active.retain(|&id| {
-            let last = &mut self.last_by_campaign[id as usize];
+            let last = &mut last_by_campaign[id as usize];
             if *last >= cutoff {
-                campaign_days.daily(id, day).assists += 1;
                 true
             } else {
                 *last = INACTIVE;
                 false
             }
         });
+        campaign_days.assist(&self.active, day);
     }
 }
 
