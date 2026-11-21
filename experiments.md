@@ -655,3 +655,11 @@ Two fanout changes against `8d6ebdb` (128 user and 128 ID partitions), each scre
 | 256 ID partitions | Two three-pair series: 0.918 vs 0.838 s on a loaded host, then 0.793 vs 0.786 s; dedup 0.066 vs 0.063 s, parse 0.397 vs 0.405 s |
 
 **Reverted.** More user partitions slowed parse, links and resolve. More ID partitions saved under 0.005 s of dedup and cost as much in parse.
+
+### R3-WORDLOAD
+
+Pack short keys and catalog names from one eight-byte load masked to the field length, when eight bytes from the field start lie inside its chunk, instead of copying the bytes. A unit test compared the masked path with the copying path for every test value at every distance from the end of its buffer. Key packing had taken about 28% of click-parse samples, including the copy.
+
+Screen against `af53ca3`: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs: parse 0.401 vs 0.391 s, end to end 0.781 vs 0.783 s.
+
+**Reverted.** The parse saving did not reach end-to-end time.
