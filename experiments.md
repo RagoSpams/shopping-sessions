@@ -257,3 +257,16 @@ Partition payloads by user during parsing. Send an eight-byte projected ID and r
 | tickets | 0.686 / 5.019 | 0.043 / 0.276 | 0.148 / 1.069 | 0.208 / 1.500 | 0.415 / 2.769 | 0.094 / 0.535 | 0.001 / 0.002 | 1.755 / 11.659 | 3.42 |
 
 **Kept.** The extra parse scatter was cheaper than repartitioning and indexing every payload. The revised target is 0.75 s local native for a board score below 0.80 s.
+
+### R3-TICKETS versus R3-PACK
+
+Independent cumulative comparison against the last reported native milestone.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.734 / 4.998 | 0.053 / 0.302 | 0.493 / 3.165 | 0.222 / 1.446 | 0.515 / 3.334 | 0.173 / 0.574 | 0.001 / 0.002 | 2.477 / 14.883 | 3.36 |
+| tickets | 0.780 / 5.538 | 0.050 / 0.285 | 0.158 / 1.108 | 0.238 / 1.690 | 0.429 / 2.929 | 0.094 / 0.590 | 0.001 / 0.002 | 1.939 / 12.413 | 3.42 |
+
+R3-TICKETS crossed the revised 10% milestone. The 0.75 s native target is still open.
