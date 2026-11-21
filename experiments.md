@@ -348,3 +348,16 @@ For nine to sixteen decimal epoch digits, validate two overlapping words and com
 | epoch | 0.524 / 3.662 | 0.048 / 0.289 | 0.136 / 0.928 | 0.250 / 1.827 | 0.402 / 2.795 | 0.079 / 0.492 | 0.001 / 0.002 | 1.541 / 10.119 | 3.07 |
 
 **Reverted.** Parse CPU was unchanged and end-to-end wall rose.
+
+### R3-HOT
+
+Cache recent exact packed aliases and canonical roots in 2,048 direct-mapped entries per user shard.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.556 / 3.846 | 0.045 / 0.285 | 0.136 / 0.918 | 0.245 / 1.763 | 0.398 / 2.732 | 0.080 / 0.534 | 0.001 / 0.002 | 1.594 / 10.478 | 3.05 |
+| hot | 0.547 / 3.803 | 0.048 / 0.318 | 0.122 / 0.819 | 0.249 / 1.809 | 0.372 / 2.702 | 0.080 / 0.489 | 0.001 / 0.003 | 1.558 / 10.170 | 3.05 |
+
+**Reverted.** The second locked series reversed the end-to-end result (1.588 → 1.625 s). Resolve got slower in both series, including 1.984 → 2.111 CPU-s on confirmation.
