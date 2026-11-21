@@ -3,7 +3,6 @@ use crate::key::{Key, PackedKey};
 use crate::records::{Candidate, PendingEvent, Record};
 use crate::scan::rows;
 use ahash::RandomState;
-use hashbrown::HashTable;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{Click, Event, PersonRow};
@@ -62,29 +61,75 @@ fn local(id: u32) -> usize {
     id as usize / USERS
 }
 
+// Empty IDs are invalid in links and in every routed row, so the zero packed
+// key is an available empty slot. Store the canonical person alongside the
+// exact key: a successful linear probe reads both on the same cache line.
+#[derive(Clone, Copy, Default)]
+struct AliasSlot {
+    name: PackedKey,
+    hash: u32,
+    person: u32,
+}
+
 #[derive(Default)]
 pub struct Directory {
     names: Vec<Key>,
-    table: HashTable<(PackedKey, u32)>,
-    roots: Vec<u32>,
+    slots: Vec<AliasSlot>,
 }
 
 impl Directory {
-    fn intern(&mut self, name: PackedKey, hash: u64, state: &RandomState, chunks: &[Mmap]) -> u32 {
-        let names = &mut self.names;
-        self.table
-            .entry(
-                hash,
-                |&(stored, _)| name.matches(stored, chunks),
-                |&(stored, _)| stored.hash(state, chunks),
-            )
-            .or_insert_with(|| {
-                let id = u32::try_from(names.len()).unwrap();
-                names.push(name.name(chunks));
-                (name, id)
-            })
-            .get()
-            .1
+    #[inline]
+    fn probe(&self, name: PackedKey, hash: u32, chunks: &[Mmap]) -> usize {
+        let mask = self.slots.len() - 1;
+        let mut i = hash as usize & mask;
+        loop {
+            let slot = &self.slots[i];
+            if slot.name == PackedKey::default()
+                || (slot.hash == hash && name.matches(slot.name, chunks))
+            {
+                return i;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn grow(&mut self) {
+        let capacity = (2 * self.slots.len()).max(16);
+        let old = std::mem::replace(&mut self.slots, vec![AliasSlot::default(); capacity]);
+        for slot in old
+            .into_iter()
+            .filter(|slot| slot.name != PackedKey::default())
+        {
+            let mut i = slot.hash as usize & (capacity - 1);
+            while self.slots[i].name != PackedKey::default() {
+                i = (i + 1) & (capacity - 1);
+            }
+            self.slots[i] = slot;
+        }
+    }
+
+    #[inline]
+    fn intern(&mut self, shard: usize, name: PackedKey, hash: u64, chunks: &[Mmap]) -> u32 {
+        let hash = hash as u32;
+        if self.slots.is_empty() {
+            self.grow();
+        }
+        let mut i = self.probe(name, hash, chunks);
+        if self.slots[i].name != PackedKey::default() {
+            return self.slots[i].person;
+        }
+        if (self.names.len() + 1) * 3 > self.slots.len() * 2 {
+            self.grow();
+            i = self.probe(name, hash, chunks);
+        }
+        let id = person(shard, self.names.len());
+        self.names.push(name.name(chunks));
+        self.slots[i] = AliasSlot {
+            name,
+            hash,
+            person: id,
+        };
+        id
     }
 
     fn route<T: Candidate>(
@@ -95,21 +140,34 @@ impl Directory {
         chunks: &[Mmap],
     ) -> Vec<Vec<PersonRow<T::Valid>>> {
         let mut output = buckets::empty(USERS);
-        for row in rows.into_iter().flatten() {
-            let Some(data) = row.payload.validate() else {
-                continue;
-            };
-            let index = self.intern(row.user, row.user.hash(state, chunks), state, chunks) as usize;
-            // Unlinked names are appended after the link-only root table.
-            let root = self
-                .roots
-                .get(index)
-                .copied()
-                .unwrap_or_else(|| person(shard, index));
-            output[owner(root)].push(PersonRow {
-                person: local(root) as u32,
-                data,
-            });
+        for run in rows {
+            for block in run.chunks(32) {
+                let mut hashes = [0; 32];
+                for (hash, row) in hashes.iter_mut().zip(block) {
+                    *hash = row.user.hash(state, chunks);
+                    #[cfg(target_arch = "x86_64")]
+                    if !self.slots.is_empty() {
+                        let i = *hash as usize & (self.slots.len() - 1);
+                        // The slot belongs to the current table. A later grow
+                        // can invalidate this hint but never the lookup below.
+                        unsafe {
+                            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                                self.slots.as_ptr().add(i).cast(),
+                            );
+                        }
+                    }
+                }
+                for (&hash, row) in hashes.iter().zip(block) {
+                    let Some(data) = row.payload.validate() else {
+                        continue;
+                    };
+                    let root = self.intern(shard, row.user, hash, chunks);
+                    output[owner(root)].push(PersonRow {
+                        person: local(root) as u32,
+                        data,
+                    });
+                }
+            }
         }
         output
     }
@@ -133,7 +191,7 @@ fn root(parents: &[Vec<AtomicU32>], mut id: u32) -> u32 {
     }
 }
 
-pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap], state: &RandomState) -> Vec<Directory> {
+pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap]) -> Vec<Directory> {
     let slots: Vec<_> = (0..batches.iter().map(|b| b.count).sum())
         .map(|_| AtomicU32::new(0))
         .collect();
@@ -152,8 +210,8 @@ pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap], state: &RandomState) -> V
             let mut dir = Directory::default();
             for (base, ends) in parts {
                 for endpoint in ends {
-                    let i = dir.intern(endpoint.name, endpoint.hash, state, chunks);
-                    slots[base + endpoint.slot].store(person(shard, i as usize), Relaxed);
+                    let id = dir.intern(shard, endpoint.name, endpoint.hash, chunks);
+                    slots[base + endpoint.slot].store(id, Relaxed);
                 }
             }
             dir
@@ -190,10 +248,12 @@ pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap], state: &RandomState) -> V
             }
         }
     });
-    dirs.par_iter_mut().enumerate().for_each(|(shard, dir)| {
-        dir.roots = (0..dir.names.len())
-            .map(|i| root(&parents, person(shard, i)))
-            .collect();
+    dirs.par_iter_mut().for_each(|dir| {
+        for slot in &mut dir.slots {
+            if slot.name != PackedKey::default() {
+                slot.person = root(&parents, slot.person);
+            }
+        }
     });
     dirs
 }

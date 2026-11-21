@@ -21,12 +21,13 @@ pub struct Record<T> {
     pub payload: T,
 }
 
+#[derive(Clone, Copy)]
 pub struct PendingEvent {
     ingest: i64,
     event: Event,
 }
 
-pub trait Candidate: Send + Sync {
+pub trait Candidate: Send + Sync + Copy {
     fn discard(&mut self);
     type Valid: Send;
     fn earlier(&self, other: &Self) -> bool;

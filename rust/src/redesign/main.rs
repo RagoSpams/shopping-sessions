@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     chunks.extend(read_chunks(&input.join("clicks"), CHUNK)?);
     let link_batch = links::parse(&chunks, 0..links_end, &hash);
     timer.end(Stage::Parse);
-    let directory = links::build(link_batch, &chunks, &hash);
+    let directory = links::build(link_batch, &chunks);
     timer.end(Stage::Links);
 
     // Retiring the event dedup index before building the click index also

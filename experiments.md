@@ -412,3 +412,16 @@ A diagnostic build of `572e871` used the same passive residency and stage counte
 | 60M repeat | 97.68% | 7.13 | 39.07 + 7.69 | 9.37 | 8,276 | 16.12 | 5.81 | 11.55 | 10.04 |
 
 The repeat reduced dedup from calibration's 14.42 to 5.81 CPU-s, while resolve rose from 5.51 to 11.55 CPU-s with the larger 32-way alias shards. Initial residency and host load differed between runs. A separate 20M resolve profile assigned 45.4% of user-mode samples to the Swiss table's find-or-insert-slot closure and 13.1% to the root fetch.
+
+### R3-PREFETCH
+
+Batch 32 row hashes and prefetch the corresponding exact linear alias slots before probing for canonical roots. This revisits the rejected linear table with independent outstanding memory requests.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.580 / 4.062 | 0.048 / 0.311 | 0.145 / 0.989 | 0.265 / 1.985 | 0.378 / 2.766 | 0.074 / 0.476 | 0.001 / 0.002 | 1.600 / 10.546 | 3.06 |
+| prefetch | 0.555 / 3.927 | 0.048 / 0.312 | 0.139 / 0.936 | 0.201 / 1.423 | 0.395 / 2.629 | 0.073 / 0.451 | 0.001 / 0.002 | 1.514 / 9.781 | 3.06 |
+
+**Kept.** Batched probing lowered both resolve CPU and wall and improved the full-process median.
