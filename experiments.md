@@ -538,3 +538,11 @@ Parse each event straight into the aggregate's sortable word (window-relative mi
 | pk16 | 0.605 / 4.202 | 0.068 / 0.472 | 0.105 / 0.746 | 0.130 / 1.008 | 0.228 / 1.763 | 0.002 / 0.002 | 0.006 / 0.008 | 1.175 / 8.316 | 2.85 |
 
 **Kept.** All five pairs favored the packed build (1.175 vs 1.287 s median); system CPU fell from 1.911 to 1.162 s and peak RSS from 3.14 to 2.85 GiB. Both builds also matched the frozen oracle on three edge sets derived from s2-200k: a 400-year window and a 1,000-category catalog (full-width path), and a 49.7-day window ending 296 ms short of the 32-bit offset limit (packed path).
+
+### R3-POPREAD
+
+Prefault each input chunk's cached file pages with `MADV_POPULATE_READ` before parsing it (links, events and clicks).
+
+36/36 fixtures were not run. Three alternating single 20M runs against `965fab4` measured 1.08/0.89/0.94 s vs 1.04/0.91/0.92 s end to end, with system CPU 1.34/0.94/1.03 vs 1.32/0.91/1.04 s.
+
+**Reverted.** Fewer minor faults did not lower system time or wall time; fault-around already maps cached file pages in 64 KiB groups.
