@@ -14,8 +14,9 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use shopping_sessions::csv::Location;
 use shopping_sessions::output::CampaignDay;
-use shopping_sessions::time::{DAY_MS, Window};
+use shopping_sessions::time::{DAY_MS, LOOKBACK_MS, Window};
 
 // Limit scratch per worker for long windows or large campaign catalogs.
 enum Totals {
@@ -365,10 +366,20 @@ fn order_people<T, U: Copy>(
     Groups { rows, ends }
 }
 
-fn process_groups<T>(
+/// A click with its window-relative millisecond and campaign in one sortable
+/// word. Equal-time clicks need no order: attribution compares their IDs.
+#[derive(Clone, Copy)]
+struct PackedClick {
+    key: u64,
+    location: Location,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_groups<T, C>(
     events: &Groups<T>,
-    clicks: &Groups<Click>,
+    clicks: &Groups<C>,
     decode: impl Fn(&T) -> Event,
+    click_of: impl Fn(&C) -> Click,
     user_day: &mut UserDay,
     attribution: &mut Attribution<'_>,
     totals: &mut Totals,
@@ -381,6 +392,7 @@ fn process_groups<T>(
                 events,
                 &decode,
                 clicks,
+                &click_of,
                 attribution,
                 totals,
                 emit,
@@ -404,6 +416,10 @@ pub fn aggregate<E: EventRows>(
     user_dir: &Path,
     release: &(impl Fn() + Sync),
 ) -> Result<CampaignColumns> {
+    // Parsed clicks lie in [window start - lookback, window end). When that
+    // span fits in 32 bits, a click's time and campaign share one word.
+    let click_origin = window.start - LOOKBACK_MS;
+    let packed_clicks = window.end - click_origin <= i64::from(u32::MAX) + 1;
     let parallelism = rayon::current_num_threads().min(USERS);
     // Workers claim the largest remaining shard first to balance the finish.
     let mut order: Vec<_> = (0..events.len()).collect();
@@ -436,12 +452,6 @@ pub fn aggregate<E: EventRows>(
                     continue;
                 }
                 let people = names[shard].len();
-                let clicks = order_people(
-                    clicks,
-                    people,
-                    |c| c,
-                    |rows| rows.sort_unstable_by_key(|c| c.time),
-                );
                 let mut emit = |id: u32, day, sessions, count, revenue, top: Option<u32>| {
                     if daily.last_person != Some((shard, id)) {
                         daily.last_person = Some((shard, id));
@@ -472,15 +482,49 @@ pub fn aggregate<E: EventRows>(
                 let events = order_people(events, people, E::sorted, |rows| {
                     E::sort(rows, &mut sort_scratch)
                 });
-                process_groups(
-                    &events,
-                    &clicks,
-                    |row| E::event(row, window),
-                    &mut user_day,
-                    &mut attribution,
-                    &mut totals,
-                    &mut emit,
-                )?;
+                let event = |row: &E::Sorted| E::event(row, window);
+                if packed_clicks {
+                    let clicks = order_people(
+                        clicks,
+                        people,
+                        |c| PackedClick {
+                            key: ((c.time - click_origin) as u64) << 32 | u64::from(c.campaign),
+                            location: c.location,
+                        },
+                        |rows| rows.sort_unstable_by_key(|c| c.key),
+                    );
+                    process_groups(
+                        &events,
+                        &clicks,
+                        event,
+                        |c| Click {
+                            time: click_origin + (c.key >> 32) as i64,
+                            campaign: c.key as u32,
+                            location: c.location,
+                        },
+                        &mut user_day,
+                        &mut attribution,
+                        &mut totals,
+                        &mut emit,
+                    )?;
+                } else {
+                    let clicks = order_people(
+                        clicks,
+                        people,
+                        |c| c,
+                        |rows| rows.sort_unstable_by_key(|c| c.time),
+                    );
+                    process_groups(
+                        &events,
+                        &clicks,
+                        event,
+                        |c| *c,
+                        &mut user_day,
+                        &mut attribution,
+                        &mut totals,
+                        &mut emit,
+                    )?;
+                }
             }
             write_users(&user_dir.join(format!("part-{part}.parquet")), &daily)?;
             drop(daily);

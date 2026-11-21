@@ -4,7 +4,6 @@ use crate::time::{DAY_MS, LOOKBACK_MS, SESSION_GAP_MS};
 use ahash::AHashMap;
 use memmap2::Mmap;
 use parquet::errors::Result;
-use std::borrow::Borrow;
 
 pub struct PersonRow<T> {
     pub person: u32,
@@ -23,12 +22,6 @@ pub struct Click {
     pub time: i64,
     pub campaign: u32,
     pub location: Location,
-}
-
-impl Borrow<Click> for PersonRow<Click> {
-    fn borrow(&self) -> &Click {
-        &self.data
-    }
 }
 
 pub type CampaignDays = AHashMap<(u32, i32), CampaignDay>;
@@ -82,9 +75,10 @@ impl<'a> Attribution<'a> {
         self.latest = None;
     }
 
-    fn credit(
+    fn credit<C>(
         &mut self,
-        clicks: &[impl Borrow<Click>],
+        clicks: &[C],
+        click_of: &impl Fn(&C) -> Click,
         start: i64,
         day: i32,
         revenue: i64,
@@ -93,7 +87,7 @@ impl<'a> Attribution<'a> {
         let cutoff = start - LOOKBACK_MS;
         let first = self.right;
         while let Some(row) = clicks.get(self.right) {
-            let click = row.borrow();
+            let click = click_of(row);
             if click.time > start {
                 break;
             }
@@ -109,15 +103,15 @@ impl<'a> Attribution<'a> {
         // Equal-time clicks enter the window together. Only ties at the
         // latest timestamp can affect the winning campaign.
         if self.right != first {
-            let mut winner = *clicks[self.right - 1].borrow();
+            let mut winner = click_of(&clicks[self.right - 1]);
             if winner.time >= cutoff {
                 for row in clicks[first..self.right - 1].iter().rev() {
-                    let click = row.borrow();
+                    let click = click_of(row);
                     if click.time != winner.time {
                         break;
                     }
                     if click.location.id(self.chunks) < winner.location.id(self.chunks) {
-                        winner = *click;
+                        winner = click;
                     }
                 }
                 self.latest = Some(winner);
@@ -189,12 +183,14 @@ impl UserDay {
     }
 
     /// Process one nonempty timestamp-ordered event range and its sorted clicks.
-    pub fn process_person<T>(
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_person<T, C>(
         &mut self,
         person: u32,
         mut events: &[T],
         decode: impl Fn(&T) -> Event,
-        clicks: &[impl Borrow<Click>],
+        clicks: &[C],
+        click_of: impl Fn(&C) -> Click,
         attribution: &mut Attribution<'_>,
         campaign_days: &mut impl CampaignTotals,
         emit: &mut impl FnMut(u32, i32, i64, i64, i64, Option<u32>) -> Result<()>,
@@ -227,7 +223,7 @@ impl UserDay {
             self.sessions += 1;
             self.events += count as i64;
             self.revenue += revenue;
-            attribution.credit(clicks, start, day, revenue, campaign_days);
+            attribution.credit(clicks, &click_of, start, day, revenue, campaign_days);
             events = &events[count..];
         }
         self.write(emit, person, day)
@@ -259,6 +255,7 @@ pub fn process(
             events,
             |r| r.data,
             matched,
+            |r| r.data,
             attribution,
             campaign_days,
             &mut emit,
