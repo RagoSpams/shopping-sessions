@@ -638,3 +638,14 @@ Split deduplication into 128 ID partitions instead of 64. Each partition's seen 
 | ids128 | 0.389 / 3.013 | 0.045 / 0.281 | 0.066 / 0.458 | 0.089 / 0.685 | 0.169 / 1.337 | 0.001 / 0.001 | 0.004 / 0.006 | 0.774 / 5.783 | 2.87 |
 
 **Kept.** Dedup fell from 0.080 to 0.066 s with no parse cost from the extra ticket streams; end to end 0.804 to 0.774 s in five pairs (screen 0.790 to 0.775 s).
+
+### R3-FANOUT
+
+Two fanout changes against `8d6ebdb` (128 user and 128 ID partitions), each screened with 36/36 fixtures, dev and s3-3m MATCH.
+
+| Variant | Screen result |
+|---|---|
+| 256 user partitions | 0.778 vs 0.806 s end to end; parse 0.387 vs 0.398, links 0.044 vs 0.051, resolve 0.091 vs 0.095 s |
+| 256 ID partitions | Two three-pair series: 0.918 vs 0.838 s on a loaded host, then 0.793 vs 0.786 s; dedup 0.066 vs 0.063 s, parse 0.397 vs 0.405 s |
+
+**Reverted.** More user partitions slowed parse, links and resolve. More ID partitions saved under 0.005 s of dedup and cost as much in parse.
