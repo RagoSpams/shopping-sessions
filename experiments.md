@@ -32,7 +32,7 @@ The Docker runs used the scorer flags and the requested 24 GiB container limit o
 
 ## Round 2 · separate partitioned binary
 
-Build the candidate with `docker build -f rust/Dockerfile.redesign -t shopping-redesign .`. The root image continues to run the shipped binary. For a native build, enable the `redesign` feature, select `--bin shopping-redesign` and use the static CRT and x86-64-v3 flags from the candidate Dockerfile.
+Round 2 introduced an opt-in image for the partitioned binary. The root Dockerfile now builds that binary for scoring. For a native build, enable the `redesign` feature, select `--bin shopping-redesign`, and use the static CRT and `x86-64-v3` flags from the root Dockerfile.
 
 | ID | Change | Correctness | Local 20M median | Disposition |
 |---|---|---|---|---|
@@ -75,3 +75,13 @@ The separate native median-of-five runs put M1 parse at 0.923 s and R2-SCAN at 0
 The focused scanner still used **1.88× the 0.440 s M2 cutoff** in its five-run series. Its parse phase alone took 6.049 CPU-s against the 3.500 CPU-s total target. M1 is exact. M2 and M3 remain unmet. Further optimization stopped at the specified gate. The 0.90 s board target remains unmeasured.
 
 The final 60M check took 10.55 s wall and 67.90 CPU-s at 10.02 GiB peak RSS. Its complete output matched the prior validated 60M output. These are single runs with uncontrolled cache residency at 60M. The shared-code default binary also passed 36 fixtures and all five frozen oracle comparisons. The additional long-ID and CSV-boundary dataset matched the M1 redesign.
+
+## Calibration
+
+| ID | Change | Correctness result | Runtime | Kept or reverted |
+| --- | --- | --- | --- | --- |
+| rust-07 | Package the partition-local redesign in the root Dockerfile | Native default and redesign each passed 36/36 fixtures and matched dev, s2-200k, s3-3m, s4-10m, and s5-20m. Both fastpq unit tests and the redesign scanner test passed offline. The calibration container passed 36/36 fixtures and matched all five frozen datasets and the published dev answer. The final timed 20M output of each image matched the oracle. | 20M Docker median 9.718 s for the original image at `88fee99` and 3.467 s for the calibration image. Ranges were 5.960–10.953 s and 3.030–4.657 s, respectively. Cold rebuild 47.05 s. Image 1.16 MB content and 3.93 MB on disk. | Kept |
+
+The calibration keeps fastpq standalone and uses the redesign's existing Parquet output. The root Dockerfile uses the digest-pinned Rust 1.90.0 builder with `-C target-feature=+crt-static -C target-cpu=x86-64-v3`. The resulting `linux/amd64` image uses `FROM scratch` and runs as UID and GID 1000.
+
+Native gates used Rust 1.100.0, `taskset -c 0-7`, and `NCPU=8`. Their single 20M runs took 7.40 s for the default and 4.26 s for the redesign. Docker gates used the scorer flags with CPUs 0–7 and the requested 24 GiB limit on a Docker Desktop VM with 15.62 GiB available. Hyperfine 2.0.0 measured Docker invocation through return, with one warmup and five measurements per image. Its prepare step emptied the output and scratch directories between runs. The cold rebuild reused the pinned base image and downloaded and compiled the locked dependencies afresh.

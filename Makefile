@@ -1,7 +1,7 @@
 IMAGE ?= shopping-sessions:latest
 CPUS  ?= 8
 MEM   ?= 24g
-# The scorer's platform. PLATFORM=linux/arm64 builds and runs natively on an Apple-silicon Mac, for fast local loops.
+# The Rust submission image targets the scorer's amd64 platform.
 PLATFORM ?= linux/amd64
 DEV   ?= dev
 # In the monorepo the fixtures live two levels up; the published starter has its own copy.

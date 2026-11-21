@@ -1,13 +1,13 @@
-# Shopping Sessions: DuckDB starter
+# Shopping Sessions
 
-This repository is a working skeleton, not a complete solution. It builds a `linux/amd64` image with DuckDB, runs inside the scorer's container limits, reads the inputs, and writes both output tables with the right schema. Both tables are empty, so the checker marks this skeleton incorrect until you implement the rules in `rules.md`.
+The root Dockerfile builds the partition-local Rust pipeline (`shopping-redesign`) for the `linux/amd64` scorer. It reads the mounted inputs and writes the two required Parquet tables.
 
-If this starter and `rules.md` ever disagree, `rules.md` wins. Ask the organizers if `rules.md` leaves you unsure.
+If this repository and `rules.md` ever disagree, `rules.md` wins. Ask the organizers if `rules.md` leaves you unsure.
 
 ## What to do first
 
 - Read `rules.md` for the full rules.
-- Write your pipeline in `pipeline/pipeline.py`. The TODO lists the steps in order.
+- The scorer pipeline starts in `rust/src/redesign/main.rs`.
 - Build the image and test against all 36 edge-case fixtures and the 1M-event dev set before submitting.
 
 ## Run and test locally
@@ -32,13 +32,14 @@ make check-dev                          # exact diff against dev-answer/, the tr
 If your laptop cannot spare 8 cores and 24 GB, run with lower limits using `make run-dev CPUS=4 MEM=8g`. Your local times will not match the scorer anyway; only the board's times count.
 
 - **x86 Linux and Windows machines.** Build and run the amd64 image natively.
-- **Apple-silicon Macs.** Emulating amd64 is slow. For fast local loops, build a native image with `make build run-dev PLATFORM=linux/arm64`. The Dockerfile pins no platform, so it builds either way. Check the amd64 image before you submit.
+- **Apple-silicon Macs.** Use Docker's `linux/amd64` emulation to run the scorer image.
 
-To iterate without Docker:
+To iterate on an x86-64-v3 host without Docker, build the redesign and run the fixtures.
 
 ```sh
-pip install duckdb==1.5.6
-python3 scripts/run_fixtures.py fixtures -- python3 pipeline/pipeline.py
+RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --locked \
+  --manifest-path rust/Cargo.toml --features redesign --bin shopping-redesign
+python3 scripts/run_fixtures.py fixtures -- rust/target/release/shopping-redesign
 ```
 
 ## Submitting and scoring
@@ -63,9 +64,7 @@ Scorers are Google Cloud n2 Intel Xeon machines, Cascade Lake or newer, with AVX
 
 ## Common pitfalls
 
-- **DuckDB's CSV reader differs from `rules.md`.** It reads a quoted empty field `""` as an empty string, not null. Its malformed-line handling, including `ignore_errors`, `strict_mode`, and `null_padding`, does not match `rules.md`. Test against the fixtures before relying on it.
-- **Memory.** `pipeline.py` sets `memory_limit` to 80% of `MEM_GB` and `temp_directory` under `/scratch`, so big joins and sorts spill to disk instead of getting the container killed.
-- **No extension downloads.** The container has no network at run time. Parquet and CSV are built into the wheel; anything else must be installed at build time.
+- **Offline runtime.** The container has no network at run time. Cargo installs the locked dependencies during the image build.
 - **`\d` is not `[0-9]`.** In several regex engines, including Rust's used by Polars, `\d` matches any Unicode digit. The rules mean ASCII digits only.
 - **Extra files in output folders.** `_SUCCESS` and other non-Parquet files in the output folders are ignored.
 
@@ -75,9 +74,10 @@ Scorers are Google Cloud n2 Intel Xeon machines, Cascade Lake or newer, with AVX
 - `day` must be a Parquet `DATE`, not a string or timestamp.
 - Row order and the number of Parquet files do not matter. Exact column names do, and there must be no extra columns.
 
-## Files in this starter
+## Repository layout
 
-- `pipeline/pipeline.py` holds your pipeline code.
+- `rust/src/redesign/` holds the scorer pipeline.
+- `reference/` holds the frozen reference implementation.
 - `Dockerfile` builds a `linux/amd64` image for the Intel Xeon scorers.
 - `fixtures/` holds the 36 edge cases, each an `input/` folder and the `expected/` tables. In this monorepo they live in `../../fixtures`; copy them in when publishing the starter as its own repo.
 - `scripts/` runs your image the way the scorer does and diffs the output.
