@@ -1,4 +1,4 @@
-use crate::buckets::{self, Partitions, USERS};
+use crate::buckets::{Partitions, USERS};
 use crate::key::Key;
 use memmap2::Mmap;
 use parquet::errors::Result;
@@ -61,6 +61,45 @@ pub struct CampaignColumns {
     assisted_sessions: Vec<i64>,
 }
 
+// Person IDs are dense indices into this shard's name vector. Count their
+// rows first so each person has a contiguous range for the timestamp sort.
+fn order_people<T: Copy>(
+    runs: Vec<Vec<PersonRow<T>>>,
+    people: usize,
+    time: impl Fn(&T) -> i64,
+) -> Vec<PersonRow<T>> {
+    let mut ends = vec![0; people];
+    for run in &runs {
+        for row in run {
+            ends[row.person as usize] += 1;
+        }
+    }
+    let mut total = 0;
+    for cursor in &mut ends {
+        let count = *cursor;
+        *cursor = total;
+        total += count;
+    }
+    let mut rows: Vec<PersonRow<T>> = Vec::with_capacity(total);
+    let dest = rows.spare_capacity_mut();
+    for run in runs {
+        for row in run {
+            let cursor = &mut ends[row.person as usize];
+            dest[*cursor].write(row);
+            *cursor += 1;
+        }
+    }
+    // Each cursor started at a distinct range of the counted length.
+    // The second pass wrote exactly those rows and initialized the full vector.
+    unsafe { rows.set_len(total) };
+    let mut start = 0;
+    for end in ends {
+        rows[start..end].sort_unstable_by_key(|row| time(&row.data));
+        start = end;
+    }
+    rows
+}
+
 pub fn aggregate(
     names: &[Vec<Key>],
     events: Partitions<PersonRow<Event>>,
@@ -84,10 +123,9 @@ pub fn aggregate(
                 if events.is_empty() {
                     continue;
                 }
-                let mut events = buckets::flatten(events);
-                let mut clicks = buckets::flatten(clicks);
-                events.sort_unstable_by_key(|row| (row.person, row.data.time));
-                clicks.sort_unstable_by_key(|row| (row.person, row.data.time));
+                let people = names[shard].len();
+                let events = order_people(events, people, |event| event.time);
+                let clicks = order_people(clicks, people, |click| click.time);
                 aggregate::process(
                     |id, day, sessions, count, revenue, top| {
                         daily.user_id.push(names[shard][id as usize].bytes(chunks));
