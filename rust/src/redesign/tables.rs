@@ -153,13 +153,57 @@ impl<T> Groups<T> {
     }
 }
 
+// For long event histories, sort only the four timestamp bytes. Equal-time
+// payloads belong to the same session, so their order has no effect on sums.
+fn sort_packed_events(rows: &mut [u64], scratch: &mut Vec<u64>) {
+    if rows.len() < 4096 {
+        rows.sort_unstable();
+        return;
+    }
+    let mut counts = [[0usize; 256]; 4];
+    for &row in rows.iter() {
+        let bytes = ((row >> 32) as u32).to_le_bytes();
+        for (hist, byte) in counts.iter_mut().zip(bytes) {
+            hist[byte as usize] += 1;
+        }
+    }
+    scratch.resize(rows.len(), 0);
+    let mut in_scratch = false;
+    for (pass, hist) in counts.iter_mut().enumerate() {
+        if hist.contains(&rows.len()) {
+            continue;
+        }
+        let mut start = 0;
+        for count in hist.iter_mut() {
+            let len = *count;
+            *count = start;
+            start += len;
+        }
+        let (src, dst) = if in_scratch {
+            (&scratch[..], &mut rows[..])
+        } else {
+            (&rows[..], &mut scratch[..])
+        };
+        let shift = 32 + pass * 8;
+        for &row in src {
+            let cursor = &mut hist[((row >> shift) & 255) as usize];
+            dst[*cursor] = row;
+            *cursor += 1;
+        }
+        in_scratch = !in_scratch;
+    }
+    if in_scratch {
+        rows.copy_from_slice(scratch);
+    }
+}
+
 // Person IDs are dense indices into this shard's name vector. Count their
 // rows first so each person has a contiguous range for the timestamp sort.
-fn order_people<T, U: Copy, K: Ord>(
+fn order_people<T, U: Copy>(
     runs: Vec<Vec<PersonRow<T>>>,
     people: usize,
     encode: impl Fn(T) -> U,
-    key: impl Fn(&U) -> K,
+    mut sort: impl FnMut(&mut [U]),
 ) -> Groups<U> {
     let mut ends = vec![0; people];
     for run in &runs {
@@ -187,7 +231,7 @@ fn order_people<T, U: Copy, K: Ord>(
     unsafe { rows.set_len(total) };
     let mut start = 0;
     for &end in &ends {
-        rows[start..end].sort_unstable_by_key(&key);
+        sort(&mut rows[start..end]);
         start = end;
     }
     Groups { rows, ends }
@@ -243,6 +287,7 @@ pub fn aggregate(
         .map(|parts| -> Result<_> {
             let mut daily = UserColumns::default();
             let mut user_day = UserDay::default();
+            let mut sort_scratch = Vec::new();
             let mut totals = Totals::new(window, campaigns.values.len());
             let mut attribution = Attribution::new(chunks, campaigns.values.len());
             for (shard, (events, clicks)) in parts {
@@ -250,7 +295,12 @@ pub fn aggregate(
                     continue;
                 }
                 let people = names[shard].len();
-                let clicks = order_people(clicks, people, |c| c, |c| c.time);
+                let clicks = order_people(
+                    clicks,
+                    people,
+                    |c| c,
+                    |rows| rows.sort_unstable_by_key(|c| c.time),
+                );
                 let mut emit = |id: u32, day, sessions, count, revenue, top: Option<u32>| {
                     daily.user_id.push(names[shard][id as usize].bytes(chunks));
                     daily.day.push(day);
@@ -278,7 +328,7 @@ pub fn aggregate(
                             let payload = (event.category << PRICE_BITS) | event.price;
                             (time << 32) | u64::from(payload)
                         },
-                        |key| *key,
+                        |rows| sort_packed_events(rows, &mut sort_scratch),
                     );
                     process_groups(
                         &events,
@@ -294,7 +344,12 @@ pub fn aggregate(
                         &mut emit,
                     )?;
                 } else {
-                    let events = order_people(events, people, |e| e, |e| e.time);
+                    let events = order_people(
+                        events,
+                        people,
+                        |e| e,
+                        |rows| rows.sort_unstable_by_key(|e| e.time),
+                    );
                     process_groups(
                         &events,
                         &clicks,
