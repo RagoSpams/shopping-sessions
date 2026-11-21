@@ -215,8 +215,8 @@ pub fn parse_events<E: EventCodec>(
 ) -> Vec<Batch<E>> {
     let expected = rows_per_worker::<E>(chunks, range.clone());
     let batches = buckets::consume_chunks(
-        range.start,
-        range.len(),
+        chunks,
+        range,
         || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];
@@ -274,8 +274,8 @@ pub fn parse_clicks<C: ClickCodec>(
 ) -> Vec<Batch<C>> {
     let expected = rows_per_worker::<C>(chunks, range.clone());
     let batches = buckets::consume_chunks(
-        range.start,
-        range.len(),
+        chunks,
+        range,
         || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];

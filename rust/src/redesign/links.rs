@@ -22,8 +22,8 @@ pub struct LinkBatch {
 
 pub fn parse(chunks: &[Mmap], range: Range<usize>, state: &RandomState) -> Vec<LinkBatch> {
     buckets::consume_chunks(
-        range.start,
-        range.len(),
+        chunks,
+        range,
         || LinkBatch {
             ends: buckets::empty(USERS),
             count: 0,
