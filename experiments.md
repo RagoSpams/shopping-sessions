@@ -322,3 +322,16 @@ Route each parsed row to its final person owner using the immutable union direct
 | owner | 2.218 / 14.710 | 0.075 / 0.318 | 0.246 / 1.203 | 0.099 / 0.570 | 0.661 / 3.797 | 0.120 / 0.566 | 0.001 / 0.002 | 3.584 / 21.603 | 3.03 |
 
 **Reverted.** Resolve became cheaper, but global alias probes in the parse loop cost far more. This directly tests the cost of introducing per-row random interning lookups into the parser.
+
+### R3-INGEST
+
+Specialize the guaranteed-valid F1 ingest path using the cached date and fixed clock digits.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.558 / 3.840 | 0.055 / 0.344 | 0.144 / 0.992 | 0.278 / 2.011 | 0.401 / 2.742 | 0.076 / 0.491 | 0.001 / 0.002 | 1.572 / 10.362 | 3.10 |
+| ingest | 0.544 / 3.792 | 0.047 / 0.291 | 0.141 / 0.945 | 0.305 / 2.256 | 0.394 / 2.901 | 0.088 / 0.552 | 0.001 / 0.002 | 1.659 / 11.065 | 3.07 |
+
+**Reverted.** Parse showed only a small reduction and the locked end-to-end median rose.
