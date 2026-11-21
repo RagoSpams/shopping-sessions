@@ -575,3 +575,16 @@ Three scanner variants against `a1bd272`, each screened with 36/36 fixtures, dev
 | Per-line masks over all four 32-byte blocks without the early newline exit | 0.417 / 0.450 | 0.835 / 0.905 |
 
 **Reverted.** None beat the per-line scanner, which runs at 3.35 GB/s per core against an 11–13 GB/s mask-only floor; carrying window state between rows cost more than recomputing masks per line. The randomized test is kept.
+
+### R3-CHUNKS
+
+Map links in 1 MiB chunks and clicks in 2 MiB chunks; events keep 8 MiB. The few, large click and link chunks had left most workers idle at the end of each of those phases.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| int1 | 0.407 / 3.103 | 0.050 / 0.288 | 0.077 / 0.540 | 0.099 / 0.769 | 0.171 / 1.342 | 0.001 / 0.001 | 0.004 / 0.006 | 0.831 / 6.119 | 2.83 |
+| chunks | 0.396 / 3.057 | 0.046 / 0.281 | 0.079 / 0.561 | 0.099 / 0.770 | 0.171 / 1.352 | 0.001 / 0.001 | 0.004 / 0.006 | 0.802 / 6.007 | 2.83 |
+
+**Kept.** Parse fell from 0.407 to 0.396 s and links from 0.050 to 0.046 s; end to end 0.831 to 0.802 s in five pairs (screen 0.815 to 0.798 s).

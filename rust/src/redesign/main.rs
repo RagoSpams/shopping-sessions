@@ -45,7 +45,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let window = load_window(&input.join("manifest.json"))?;
     // Catalogs load on one worker while the others parse and join the links.
+    // Events fill many chunks. The smaller click and link inputs use smaller
+    // chunks so the last few do not leave most workers idle.
     const CHUNK: usize = 8 * 1024 * 1024;
+    const SMALL_CHUNK: usize = 2 * 1024 * 1024;
+    const LINK_CHUNK: usize = 1024 * 1024;
     let (catalogs, linked) = rayon::join(
         || -> std::io::Result<_> {
             Ok((
@@ -54,11 +58,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         },
         || -> std::io::Result<_> {
-            let mut chunks = read_chunks(&input.join("links"), CHUNK)?;
+            let mut chunks = read_chunks(&input.join("links"), LINK_CHUNK)?;
             let links_end = chunks.len();
             chunks.extend(read_chunks(&input.join("events"), CHUNK)?);
             let events_end = chunks.len();
-            chunks.extend(read_chunks(&input.join("clicks"), CHUNK)?);
+            chunks.extend(read_chunks(&input.join("clicks"), SMALL_CHUNK)?);
             let link_batch = links::parse(&chunks, 0..links_end, &hash);
             let directory = links::build(link_batch, &chunks);
             Ok((chunks, links_end, events_end, directory))
