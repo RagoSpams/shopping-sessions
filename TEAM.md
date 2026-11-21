@@ -1,5 +1,5 @@
 # Team
 
-Name:
-Members:
-Engine: DuckDB
+Name: EzDev
+Members: EzDev
+Engine: Rust

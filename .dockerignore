@@ -1,4 +1,6 @@
 fixtures/
+pipeline/
+reference/
 dev/
 out/
 *.md
