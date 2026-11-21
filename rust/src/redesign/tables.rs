@@ -52,7 +52,8 @@ impl Totals {
         }
     }
 
-    fn merge_into(self, all: &mut CampaignDays) {
+    /// Visit every campaign day with a session or an assist.
+    fn cells(self, mut visit: impl FnMut((u32, i32), CampaignDay)) {
         match self {
             Self::Dense {
                 first,
@@ -67,14 +68,58 @@ impl Totals {
                             (index % campaigns) as u32,
                             first + (index / campaigns) as i32,
                         );
-                        all.entry(key).or_default().merge(totals);
+                        visit(key, totals);
                     }
                 }
             }
             Self::Sparse(rows) => {
                 for (key, totals) in rows {
-                    all.entry(key).or_default().merge(totals);
+                    visit(key, totals);
                 }
+            }
+        }
+    }
+
+    /// Combine the workers' totals. Equal-shaped dense matrices are summed
+    /// cell by cell; any other mix goes through a map.
+    fn combine(parts: Vec<Self>, mut visit: impl FnMut((u32, i32), CampaignDay)) {
+        let mut parts = parts.into_iter();
+        let Some(mut total) = parts.next() else {
+            return;
+        };
+        let mut map = CampaignDays::new();
+        for part in parts {
+            match (&mut total, part) {
+                (
+                    Self::Dense {
+                        first,
+                        campaigns,
+                        rows,
+                        assists,
+                    },
+                    Self::Dense {
+                        first: part_first,
+                        campaigns: part_campaigns,
+                        rows: part_rows,
+                        assists: part_assists,
+                    },
+                ) if *first == part_first && *campaigns == part_campaigns => {
+                    for (cell, part) in rows.iter_mut().zip(part_rows) {
+                        cell.merge(part);
+                    }
+                    for (cell, part) in assists.iter_mut().zip(part_assists) {
+                        *cell += part;
+                    }
+                }
+                (_, part) => part.cells(|key, totals| map.entry(key).or_default().merge(totals)),
+            }
+        }
+        if map.is_empty() {
+            total.cells(visit);
+        } else {
+            total.cells(|key, totals| map.entry(key).or_default().merge(totals));
+            for (key, totals) in map {
+                visit(key, totals);
             }
         }
     }
@@ -416,12 +461,8 @@ pub fn aggregate<E: EventRows>(
             Ok(totals)
         })
         .collect::<Result<_>>()?;
-    let mut all = CampaignDays::new();
-    for totals in parts {
-        totals.merge_into(&mut all);
-    }
     let mut campaign = CampaignColumns::default();
-    for ((id, day), x) in all {
+    Totals::combine(parts, |(id, day), x| {
         let (name, channel) = &campaigns.values[id as usize];
         campaign.campaign_id.push(name);
         campaign.channel.push(channel);
@@ -430,7 +471,7 @@ pub fn aggregate<E: EventRows>(
         campaign.purchasing_sessions.push(x.purchasing);
         campaign.revenue_cents.push(x.revenue);
         campaign.assisted_sessions.push(x.assists);
-    }
+    });
     Ok(campaign)
 }
 
