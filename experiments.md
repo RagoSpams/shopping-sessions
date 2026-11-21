@@ -588,3 +588,11 @@ Map links in 1 MiB chunks and clicks in 2 MiB chunks; events keep 8 MiB. The few
 | chunks | 0.396 / 3.057 | 0.046 / 0.281 | 0.079 / 0.561 | 0.099 / 0.770 | 0.171 / 1.352 | 0.001 / 0.001 | 0.004 / 0.006 | 0.802 / 6.007 | 2.83 |
 
 **Kept.** Parse fell from 0.407 to 0.396 s and links from 0.050 to 0.046 s; end to end 0.831 to 0.802 s in five pairs (screen 0.815 to 0.798 s).
+
+### R3-BITPAIR
+
+Interleave each dedup partition's seen and repeated bitmap words so both tests for a ticket share a cache line.
+
+Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `9c4f186`: dedup 0.085 vs 0.088 s, end to end 0.868 vs 0.826 s.
+
+**Reverted.** Dedup time did not fall.
