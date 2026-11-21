@@ -190,3 +190,29 @@ The release diagnostic build of calibration `b9c43d2` recorded counters at stage
 | 60M repeat | 88.43% | 8.11 | 47.41 + 7.64 | 10.35 | 7,866 | 21.48 | 14.42 | 5.51 | 10.51 |
 
 The first 60M run reproduced the previously reported 68 CPU-s. Of its 46,480 major faults, 46,466 had occurred by end-of-click-parse. Compared with that run, the repeat saved 14.39 parse CPU-s and 9.31 system CPU-s across the whole process. At end-of-click-parse in the repeat, RSS included 4.49 GiB anonymous and 5.28 GiB file-backed pages. The roughly 10 GiB peak includes the mapped CSV pages. Even at higher initial residency, dedup used 4.66× the 20M CPU and resolve used 4.11×. Larger local tables and different seed distributions remain plausible contributors. Hardware cache counters were unavailable.
+
+### R3-PACK
+
+Represent up to nine 7-bit characters losslessly in one word. An explicit mapped form handles other lengths, high bytes, and nonempty fields ending in NUL. Materialize byte strings only for distinct directory names. Exact byte comparisons resolve mapped-key hash collisions.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| coarse | 0.931 / 4.740 | 0.055 / 0.285 | 0.581 / 2.893 | 0.481 / 1.305 | 1.007 / 3.177 | 0.174 / 0.604 | 0.003 / 0.003 | 3.689 / 13.477 | 3.70 |
+| packed | 0.965 / 4.728 | 0.124 / 0.285 | 0.553 / 2.473 | 0.564 / 1.428 | 0.917 / 3.060 | 0.170 / 0.520 | 0.005 / 0.002 | 3.397 / 13.055 | 3.35 |
+
+**Kept.** The string round-trip and equality test covered quoting, length boundaries, NUL, UTF-8 and CR. The parser boundary test also passed. Smaller records reduced peak RSS and improved end-to-end wall time on a contended host.
+
+### R3-PACK versus calibration
+
+A separate paired run compares the cumulative candidate to the calibration ELF. Host contention elevated absolute wall time in this series.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| base | 1.357 / 6.515 | 0.079 / 0.253 | 0.620 / 3.129 | 0.374 / 1.416 | 1.034 / 3.481 | 0.160 / 0.581 | 0.002 / 0.002 | 3.979 / 15.499 | 3.81 |
+| packed | 0.736 / 4.197 | 0.097 / 0.279 | 0.395 / 2.310 | 0.374 / 1.315 | 0.950 / 2.813 | 0.176 / 0.502 | 0.001 / 0.002 | 3.199 / 11.621 | 3.36 |
+
+The cumulative improvement triggered the container gate.

@@ -1,5 +1,5 @@
 use crate::buckets::{self, Partitions, Runs, USERS, bucket};
-use crate::key::Key;
+use crate::key::{Key, PackedKey};
 use crate::records::Named;
 use crate::scan::rows;
 use ahash::RandomState;
@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 struct Endpoint {
-    name: Key,
+    name: PackedKey,
     hash: u64,
     slot: usize,
 }
@@ -36,7 +36,7 @@ pub fn parse(chunks: &[Mmap], range: Range<usize>, state: &RandomState) -> Vec<L
                     continue;
                 }
                 for field in [left, right] {
-                    let name = Key::new(field, chunk, i);
+                    let name = PackedKey::new(field, chunk, i);
                     let hash = name.hash(state, chunks);
                     batch.ends[bucket(hash, USERS)].push(Endpoint {
                         name,
@@ -65,26 +65,26 @@ fn local(id: u32) -> usize {
 #[derive(Default)]
 pub struct Directory {
     names: Vec<Key>,
-    table: HashTable<u32>,
+    table: HashTable<(PackedKey, u32)>,
     roots: Vec<u32>,
 }
 
 impl Directory {
-    fn intern(&mut self, name: Key, hash: u64, state: &RandomState, chunks: &[Mmap]) -> u32 {
+    fn intern(&mut self, name: PackedKey, hash: u64, state: &RandomState, chunks: &[Mmap]) -> u32 {
         let names = &mut self.names;
-        *self
-            .table
+        self.table
             .entry(
                 hash,
-                |&id| name.matches(names[id as usize], chunks),
-                |&id| names[id as usize].hash(state, chunks),
+                |&(stored, _)| name.matches(stored, chunks),
+                |&(stored, _)| stored.hash(state, chunks),
             )
             .or_insert_with(|| {
                 let id = u32::try_from(names.len()).unwrap();
-                names.push(name);
-                id
+                names.push(name.name(chunks));
+                (name, id)
             })
             .get()
+            .1
     }
 
     fn route<T>(
