@@ -270,3 +270,16 @@ Independent cumulative comparison against the last reported native milestone.
 | tickets | 0.780 / 5.538 | 0.050 / 0.285 | 0.158 / 1.108 | 0.238 / 1.690 | 0.429 / 2.929 | 0.094 / 0.590 | 0.001 / 0.002 | 1.939 / 12.413 | 3.42 |
 
 R3-TICKETS crossed the revised 10% milestone. The 0.75 s native target is still open.
+
+### R3-USERS32
+
+Reduce user/person fanout from 256 to 32 to shorten the parse write frontier. This also increases the populations of the individual alias directories.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tickets | 0.850 / 4.547 | 0.074 / 0.260 | 0.229 / 1.003 | 0.322 / 1.402 | 0.769 / 2.821 | 0.135 / 0.493 | 0.003 / 0.002 | 2.705 / 10.712 | 3.36 |
+| user32 | 0.826 / 4.329 | 0.080 / 0.261 | 0.221 / 0.880 | 0.458 / 2.085 | 0.624 / 2.642 | 0.146 / 0.478 | 0.003 / 0.002 | 2.649 / 10.913 | 3.37 |
+
+**Kept.** Both five-pair series improved end-to-end wall on this host. Pooled medians were 2.678 → 2.648 s. Resolve CPU increased in both series. The next experiment removes its second directory lookup.
