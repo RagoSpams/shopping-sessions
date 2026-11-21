@@ -361,3 +361,16 @@ Cache recent exact packed aliases and canonical roots in 2,048 direct-mapped ent
 | hot | 0.547 / 3.803 | 0.048 / 0.318 | 0.122 / 0.819 | 0.249 / 1.809 | 0.372 / 2.702 | 0.080 / 0.489 | 0.001 / 0.003 | 1.558 / 10.170 | 3.05 |
 
 **Reverted.** The second locked series reversed the end-to-end result (1.588 → 1.625 s). Resolve got slower in both series, including 1.984 → 2.111 CPU-s on confirmation.
+
+### R3-DIMWORD
+
+Create a second exact catalog index for keys that fit into seven bytes plus length. Use a masked word load when all eight bytes are mapped.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.527 / 3.611 | 0.046 / 0.303 | 0.126 / 0.829 | 0.259 / 1.891 | 0.388 / 2.814 | 0.073 / 0.465 | 0.002 / 0.004 | 1.537 / 10.054 | 3.05 |
+| dims | 0.526 / 3.691 | 0.052 / 0.346 | 0.155 / 1.031 | 0.265 / 1.964 | 0.377 / 2.675 | 0.076 / 0.465 | 0.001 / 0.002 | 1.599 / 10.385 | 3.09 |
+
+**Reverted.** The extra index did not reduce parse time and increased end-to-end latency.
