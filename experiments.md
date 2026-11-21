@@ -125,3 +125,16 @@ The release build passed 36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3
 | R3-FLAT | 0.562 / 3.934 | 0.058 / 0.291 | 1.083 / 7.769 | 0.191 / 1.272 | 0.436 / 3.018 | 0.077 / 0.488 | 0.001 / 0.002 | 2.587 / 17.152 | 3.93 |
 
 **Reverted.** Parse saved 2.310 CPU-s (37.0%). Moving wide records into 1,024 partitions and returning to input bytes for winners cost 4.544 extra CPU-s in dedup. End-to-end wall rose 13.9%.
+
+### R3-FILTER
+
+Within each existing ID partition, a bit seen just once proves the row unique. A second bitmap routes all potentially repeated keys to the exact winner table. The number of repeat hits bounds its initial capacity. Colliding projections only increase work.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| base | 0.936 / 6.931 | 0.047 / 0.289 | 0.506 / 3.527 | 0.215 / 1.501 | 0.512 / 3.469 | 0.086 / 0.560 | 0.001 / 0.002 | 2.438 / 16.420 | 3.81 |
+| filter | 0.922 / 6.799 | 0.041 / 0.265 | 0.405 / 2.930 | 0.222 / 1.542 | 0.511 / 3.383 | 0.090 / 0.580 | 0.001 / 0.002 | 2.385 / 15.826 | 3.82 |
+
+**Kept.** The smaller winner tables reduced dedup CPU and end-to-end time.
