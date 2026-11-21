@@ -12,6 +12,68 @@ pub const SHARDS: usize = 256;
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 pub fn csv<const N: usize>(line: &[u8]) -> Option<[&[u8]; N]> {
+    #[cfg(target_arch = "x86_64")]
+    if (16..=128).contains(&line.len()) {
+        return csv_with_masks(line);
+    }
+    csv_with_search(line)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn csv_with_masks<const N: usize>(line: &[u8]) -> Option<[&[u8]; N]> {
+    use std::arch::x86_64::{
+        __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
+    };
+
+    let (mut commas, mut quotes) = (0u128, 0u128);
+    // x86-64 always has SSE2. Full vectors and the possibly overlapping
+    // final vector both lie entirely within the current line.
+    unsafe {
+        let comma = _mm_set1_epi8(b',' as i8);
+        let quote = _mm_set1_epi8(b'"' as i8);
+        let mut scan = |start: usize| {
+            let bytes = _mm_loadu_si128(line.as_ptr().add(start).cast::<__m128i>());
+            commas |= (_mm_movemask_epi8(_mm_cmpeq_epi8(bytes, comma)) as u128) << start;
+            quotes |= (_mm_movemask_epi8(_mm_cmpeq_epi8(bytes, quote)) as u128) << start;
+        };
+        for start in (0..line.len() / 16 * 16).step_by(16) {
+            scan(start);
+        }
+        if line.len() % 16 != 0 {
+            scan(line.len() - 16);
+        }
+    }
+    if commas.count_ones() as usize != N - 1 {
+        return None;
+    }
+    let mut result = [&[][..]; N];
+    let mut start = 0;
+    for (index, field) in result.iter_mut().enumerate() {
+        let end = if index + 1 == N {
+            line.len()
+        } else {
+            let end = commas.trailing_zeros() as usize;
+            commas &= commas - 1;
+            end
+        };
+        let bytes = &line[start..end];
+        *field = if bytes.first() == Some(&b'"') {
+            if bytes.len() < 2 || bytes.last() != Some(&b'"') {
+                return None;
+            }
+            // Consume only each field's permitted pair. Any other quote,
+            // including one in an unquoted field, remains after the loop.
+            quotes &= !((1u128 << start) | (1u128 << (end - 1)));
+            &bytes[1..bytes.len() - 1]
+        } else {
+            bytes
+        };
+        start = end + 1;
+    }
+    (quotes == 0).then_some(result)
+}
+
+fn csv_with_search<const N: usize>(line: &[u8]) -> Option<[&[u8]; N]> {
     let mut commas = memchr_iter(b',', line);
     let mut start = 0;
     let mut result = [&[][..]; N];
