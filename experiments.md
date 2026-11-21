@@ -663,3 +663,11 @@ Pack short keys and catalog names from one eight-byte load masked to the field l
 Screen against `af53ca3`: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs: parse 0.401 vs 0.391 s, end to end 0.781 vs 0.783 s.
 
 **Reverted.** The parse saving did not reach end-to-end time.
+
+### R3-CLICKCOPIES
+
+Keep every copy of a click and skip click deduplication. The rules give copies identical values, so a copy has the same person, time, campaign and click ID. It cannot change the latest-click credit, whose ties break on the click ID, or the set of assisting campaigns. Click parsing then packs no click ID and writes no tickets.
+
+Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Screen against `af53ca3`: 0.777 vs 0.736 s end to end; parse 0.403 vs 0.367 s; dedup 0.070 vs 0.055 s; aggregate 0.150 vs 0.169 s. Two five-pair series: 0.816 vs 0.829 s and 0.833 vs 0.812 s; pooled ten-run medians 0.8245 vs 0.8205 s. Dedup fell by 0.010–0.015 s in every series.
+
+**Reverted pending confirmation.** The end-to-end gain did not survive the ten-pair series. Click parsing, dedup and resolve now belong to the shop-r3-out lane, which can combine this with packed click words.
