@@ -699,3 +699,9 @@ Run the release build with 12 or 16 pool threads instead of 8 while still pinned
 Three interleaved single runs per size against `af53ca3` code: 8 threads 0.89 (first run), 0.76 and 0.77 s; 12 threads 0.81, 0.79 and 0.79 s; 16 threads 0.82, 0.78 and 0.82 s.
 
 **Not adopted.** Oversubscription did not help, and the scorer sets `NCPU` anyway.
+
+### R3-PROVISION-FLOOR
+
+Measured on `aaf2481` before any provisioning change. During a 20M run the process held 0.93–1.02 GB of anonymous memory, of which 0.85–0.95 GB was on transparent huge pages; the system counted 612 huge-page faults and no fallbacks, so jemalloc's huge-page advice is already in effect. Later stages already reuse freed memory (event tickets, then click rows, resolve forwards and aggregation scratch), so the event parse's 672 MB of 16-byte rows and 16-byte tickets is the only large fresh allocation. On this host fresh huge pages cost about 0.69 CPU-s per GB of zeroing and host backing, about 0.46 CPU-s (0.06 s) inside event parsing, consistent with the earlier fresh-versus-reused parse comparison (0.35–0.41 vs 0.29–0.31 s). The startup join leaves about 0.065 idle thread-seconds (links: 0.29 CPU-s in 0.043–0.047 s on eight threads), enough to prefault about a third of those pages, hiding at most about 0.008 s. A helper that populated pages during parsing raised system time (R3-PROVISION).
+
+**Floor.** Further savings need fewer bytes per event row or ticket.
