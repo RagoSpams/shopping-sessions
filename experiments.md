@@ -718,3 +718,11 @@ Force inlining of the per-row helpers the release build kept out of line: the F1
 | inline1 | 0.414 / 3.145 | 0.049 / 0.340 | 0.147 / 1.091 | 0.078 / 0.603 | 0.110 / 0.856 | 0.001 / 0.001 | 0.005 / 0.007 | 0.815 / 6.080 | 2.76 |
 
 **Kept.** All five pairs favored the inlined build on a loaded host: 0.944 to 0.815 s end to end and 7.03 to 6.08 CPU-s, with parse, dedup and resolve each faster. The three-pair screen gave 0.832 to 0.777 s.
+
+### R3-INLINE2
+
+Also force inlining of the timestamp dispatcher and the resolve directory's probe and intern, which the release build still kept out of line after R3-INLINE.
+
+Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Screens against `941cddb`: 0.856 vs 0.861 s and 0.775 vs 0.768 s end to end; CPU 6.471 vs 6.257 and 5.824 vs 5.708 s. Five pairs: 0.812 vs 0.831 s and 6.087 vs 5.856 CPU-s.
+
+**Reverted.** CPU fell 2–4% in every series, but wall time did not improve.
