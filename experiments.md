@@ -112,3 +112,16 @@ The three monotonic-clock windows from end-of-setup to end-of-link-parse, end-of
 | 15 | `u8::wrapping_sub` | 74 | 1.55% |
 
 The control already partitions before user interning and ID dedup. During event and click parsing, it scatters into 1,024 per-worker ID buffers and consults the catalogs. The sampled store cost motivates testing sequential output. The software clock does not measure cache misses.
+
+### R3-FLAT · sequential parse with deferred radix partitioning
+
+Each worker appended to one contiguous vector. Records contained 64-bit hashes for the record ID and the user, a mapped location for exact ID equality, and an inline-or-mapped user key. The parser performed no catalog or ID-table lookup. After parsing, a histogram sized the per-ID radix buffers, then each partition selected winners by full ID equality and earliest ingest. Only winners accessed the catalog. User interning and routing still used exact equality after partitioning on the user hash. Link endpoints also moved to contiguous streams.
+
+The release build passed 36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating Hyperfine pairs, both binaries warmed, eight workers on CPUs 0–7. Every entry is the median wall seconds / process CPU-seconds for that stage. End to end includes process exit.
+
+| Version | Parse | Links | Dedup + ID partition | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Control | 0.850 / 6.244 | 0.041 / 0.255 | 0.468 / 3.225 | 0.192 / 1.322 | 0.488 / 3.176 | 0.082 / 0.522 | 0.001 / 0.002 | 2.272 / 14.904 | 3.81 |
+| R3-FLAT | 0.562 / 3.934 | 0.058 / 0.291 | 1.083 / 7.769 | 0.191 / 1.272 | 0.436 / 3.018 | 0.077 / 0.488 | 0.001 / 0.002 | 2.587 / 17.152 | 3.93 |
+
+**Reverted.** Parse saved 2.310 CPU-s (37.0%). Moving wide records into 1,024 partitions and returning to input bytes for winners cost 4.544 extra CPU-s in dedup. End-to-end wall rose 13.9%.
