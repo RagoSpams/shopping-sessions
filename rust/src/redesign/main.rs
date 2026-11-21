@@ -1,5 +1,6 @@
 mod buckets;
 mod calendar;
+mod chunks;
 mod dims;
 mod key;
 mod links;
@@ -13,7 +14,6 @@ use ahash::RandomState;
 use memmap2::Mmap;
 use memmap2::UncheckedAdvice;
 use shopping_sessions::catalog::{Campaigns, Products, load_window, path};
-use shopping_sessions::csv::read_chunks;
 use shopping_sessions::time::{LOOKBACK_MS, Window};
 use std::error::Error;
 use std::num::NonZeroUsize;
@@ -61,32 +61,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         },
         || -> std::io::Result<_> {
-            // Link parsing needs only the link chunks, so the event and click
-            // files are mapped meanwhile. Link chunks stay first.
-            let mut chunks = read_chunks(&input.join("links"), LINK_CHUNK)?;
+            // Chunk planning reads only file lengths, so mapping every input
+            // costs no disk reads. Link chunks stay first.
+            let (mut chunks, mut spans) = (Vec::new(), Vec::new());
+            chunks::plan(&input.join("links"), LINK_CHUNK, &mut chunks, &mut spans)?;
             let links_end = chunks.len();
-            let (link_batch, others) = rayon::join(
-                || links::parse(&chunks, 0..links_end, &hash),
-                || -> std::io::Result<_> {
-                    let events = read_chunks(&input.join("events"), CHUNK)?;
-                    let clicks = read_chunks(&input.join("clicks"), SMALL_CHUNK)?;
-                    Ok((events, clicks))
-                },
-            );
-            let (events, clicks) = others?;
-            chunks.extend(events);
+            chunks::plan(&input.join("events"), CHUNK, &mut chunks, &mut spans)?;
             let events_end = chunks.len();
-            chunks.extend(clicks);
+            chunks::plan(&input.join("clicks"), SMALL_CHUNK, &mut chunks, &mut spans)?;
+            let link_batch = links::parse(&chunks, &spans, 0..links_end, &hash);
             let directory = links::build(link_batch, &chunks);
-            Ok((chunks, links_end, events_end, directory))
+            Ok((chunks, spans, links_end, events_end, directory))
         },
     );
     let ((products, product_index), (campaigns, campaign_index)) = catalogs?;
-    let (chunks, links_end, events_end, directory) = linked?;
+    let (chunks, spans, links_end, events_end, directory) = linked?;
     timer.end(Stage::Links);
 
     let inputs = Inputs {
         chunks: &chunks,
+        spans: &spans,
         links_end,
         events_end,
         hash: &hash,
@@ -119,6 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 struct Inputs<'a> {
     chunks: &'a [Mmap],
+    spans: &'a [chunks::Span],
     links_end: usize,
     events_end: usize,
     hash: &'a RandomState,
@@ -137,6 +132,7 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
 ) -> Result<(), Box<dyn Error>> {
     let Inputs {
         chunks,
+        spans,
         links_end,
         events_end,
         hash,
@@ -150,7 +146,7 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
     // Retiring the event dedup index before building the click index also
     // bounds peak working memory on the 60M workload.
     let event_index =
-        records::parse_events::<E>(chunks, links_end..events_end, hash, window, product_index);
+        records::parse_events::<E>(chunks, spans, links_end..events_end, hash, window, product_index);
     timer.end(Stage::Parse);
     let events = records::dedup(event_index, hash, chunks);
     timer.end(Stage::Dedup);
@@ -160,6 +156,7 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
     };
     let click_index = records::parse_clicks::<C>(
         chunks,
+        spans,
         events_end..chunks.len(),
         hash,
         clicks_window,

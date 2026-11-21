@@ -1,5 +1,6 @@
 use crate::buckets::{self, IDS, USERS, bucket};
 use crate::calendar::Calendar;
+use crate::chunks::Span;
 use crate::dims::Dimension;
 use crate::key::PackedKey;
 use crate::scan::rows;
@@ -187,17 +188,18 @@ const _: () = assert!((253_402_300_799 - FIRST_SECOND) >> (64 - SLOT_BITS) == 0)
 
 // Estimate allocation sizes from complete sampled rows. All buffers still
 // grow normally when worker scheduling, malformed rows or skew change demand.
-fn rows_per_worker<T>(chunks: &[Mmap], range: Range<usize>) -> usize {
+fn rows_per_worker<T>(chunks: &[Mmap], spans: &[Span], range: Range<usize>) -> usize {
     let workers = range.len().min(rayon::current_num_threads()).max(1);
+    let bytes: u128 = range.clone().map(|i| spans[i].nominal as u128).sum();
+    // One page of complete rows from the first chunk with rows sets the rate.
     let mut estimated = 0u128;
-    let mut bytes = 0u128;
     for i in range {
-        let chunk = &chunks[i];
-        bytes += chunk.len() as u128;
-        let sample = &chunk[..chunk.len().min(4096)];
+        let (from, until) = spans[i].rows(&chunks[i]);
+        let sample = &chunks[i][from.min(until)..until.min(from + 4096)];
         if let Some(end) = memchr::memrchr(b'\n', sample) {
             let rows = memchr::memchr_iter(b'\n', &sample[..=end]).count();
-            estimated += chunk.len() as u128 * rows as u128 / (end + 1) as u128;
+            estimated = bytes * rows as u128 / (end + 1) as u128;
+            break;
         }
     }
     // Bound speculative capacity even if the sample consists of empty lines.
@@ -208,20 +210,22 @@ fn rows_per_worker<T>(chunks: &[Mmap], range: Range<usize>) -> usize {
 
 pub fn parse_events<E: EventCodec>(
     chunks: &[Mmap],
+    spans: &[Span],
     range: Range<usize>,
     hash: &RandomState,
     window: Window,
     products: &Dimension,
 ) -> Vec<Batch<E>> {
-    let expected = rows_per_worker::<E>(chunks, range.clone());
+    let expected = rows_per_worker::<E>(chunks, spans, range.clone());
     let batches = buckets::consume_chunks(
-        chunks,
+        spans,
         range,
         || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
-            for (_, [id, user, ts, ingest, kind, product, price]) in rows::<7>(chunk) {
+            let (from, until) = spans[i].rows(chunk);
+            for (_, [id, user, ts, ingest, kind, product, price]) in rows::<7>(chunk, from, until) {
                 if id.is_empty() {
                     continue;
                 }
@@ -267,20 +271,22 @@ pub fn parse_events<E: EventCodec>(
 
 pub fn parse_clicks<C: ClickCodec>(
     chunks: &[Mmap],
+    spans: &[Span],
     range: Range<usize>,
     hash: &RandomState,
     window: Window,
     campaigns: &Dimension,
 ) -> Vec<Batch<C>> {
-    let expected = rows_per_worker::<C>(chunks, range.clone());
+    let expected = rows_per_worker::<C>(chunks, spans, range.clone());
     let batches = buckets::consume_chunks(
-        chunks,
+        spans,
         range,
         || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
-            for (offset, [id, user, campaign, ts]) in rows::<4>(chunk) {
+            let (from, until) = spans[i].rows(chunk);
+            for (offset, [id, user, campaign, ts]) in rows::<4>(chunk, from, until) {
                 if id.is_empty() {
                     continue;
                 }

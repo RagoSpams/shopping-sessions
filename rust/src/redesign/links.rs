@@ -1,3 +1,4 @@
+use crate::chunks::Span;
 use crate::buckets::{self, Partitions, USERS, bucket};
 use crate::key::{Key, PackedKey};
 use crate::records::{Batch, Candidate, Record};
@@ -20,9 +21,14 @@ pub struct LinkBatch {
     count: usize,
 }
 
-pub fn parse(chunks: &[Mmap], range: Range<usize>, state: &RandomState) -> Vec<LinkBatch> {
+pub fn parse(
+    chunks: &[Mmap],
+    spans: &[Span],
+    range: Range<usize>,
+    state: &RandomState,
+) -> Vec<LinkBatch> {
     buckets::consume_chunks(
-        chunks,
+        spans,
         range,
         || LinkBatch {
             ends: buckets::empty(USERS),
@@ -30,7 +36,8 @@ pub fn parse(chunks: &[Mmap], range: Range<usize>, state: &RandomState) -> Vec<L
         },
         |batch, i| {
             let chunk = &chunks[i];
-            for (_, [left, right]) in rows::<2>(chunk) {
+            let (from, until) = spans[i].rows(chunk);
+            for (_, [left, right]) in rows::<2>(chunk, from, until) {
                 if left.is_empty() || right.is_empty() {
                     continue;
                 }

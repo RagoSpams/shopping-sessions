@@ -1,12 +1,17 @@
 use memchr::memchr;
 use shopping_sessions::csv::csv;
 
-/// A mapped chunk begins at a row boundary. Offsets stay relative to that chunk
-/// so a winning click can recover its original ID on an attribution tie.
-pub fn rows<const N: usize>(chunk: &[u8]) -> impl Iterator<Item = (u32, [&[u8]; N])> {
-    let mut start = 0;
+/// Rows of a mapped chunk that start in `from..until`; the last may continue
+/// past `until`. Offsets stay relative to the mapping so a winning click can
+/// recover its original ID on an attribution tie.
+pub fn rows<const N: usize>(
+    chunk: &[u8],
+    from: usize,
+    until: usize,
+) -> impl Iterator<Item = (u32, [&[u8]; N])> {
+    let mut start = from;
     std::iter::from_fn(move || {
-        while start < chunk.len() {
+        while start < until.min(chunk.len()) {
             let offset = start;
             let tail = &chunk[start..];
             #[cfg(all(
@@ -130,7 +135,7 @@ mod tests {
         let expected: Vec<_> = lines(chunk)
             .filter_map(|(o, line)| csv::<N>(line).map(|f| (o, f)))
             .collect();
-        assert_eq!(rows::<N>(chunk).collect::<Vec<_>>(), expected);
+        assert_eq!(rows::<N>(chunk, 0, chunk.len()).collect::<Vec<_>>(), expected);
     }
 
     #[test]

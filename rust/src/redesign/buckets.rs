@@ -1,4 +1,4 @@
-use memmap2::Mmap;
+use crate::chunks::Span;
 use rayon::prelude::*;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +21,7 @@ pub fn bucket(hash: u64, count: usize) -> usize {
 /// chunks. Workers claim the largest remaining chunk first, so the last
 /// chunks in flight are small and the parallel tail stays short.
 pub fn consume_chunks<B: Send>(
-    chunks: &[Mmap],
+    spans: &[Span],
     range: Range<usize>,
     init: impl Fn() -> B + Sync,
     consume: impl Fn(&mut B, usize) + Sync,
@@ -29,7 +29,7 @@ pub fn consume_chunks<B: Send>(
     // Whole mebibytes rank the chunks, so the many full-size chunks keep
     // their file order and arrive from a cold disk in the order they are read.
     let mut order: Vec<usize> = range.collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(chunks[i].len() >> 20));
+    order.sort_by_key(|&i| std::cmp::Reverse(spans[i].nominal >> 20));
     let next = AtomicUsize::new(0);
     (0..order.len().min(rayon::current_num_threads()))
         .into_par_iter()

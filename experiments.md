@@ -750,3 +750,16 @@ Disk measurements on this host with the 20M input evicted: one `cat` stream 1.87
 Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Cold 20M medians of five, alternating with `4c905d6` on a host at load 5–7 from other builds: 1.736 vs 1.942, 1.867 vs 2.051, 1.949 vs 1.972 and 1.779 vs 2.026 s. Warm: three-pair screen 1.177 vs 1.232 s; five pairs 1.075 vs 1.019 s.
 
 **Kept** for the cold board path. Cold improved in every series. Warm was mixed under heavy load. Next, chunk planning without touching data removes the serial cold boundary and sample faults that remain ahead of parsing.
+
+### R3-RAWCHUNKS
+
+Plan input chunks from file lengths alone: each chunk owns the rows that start in one fixed byte range and is mapped from one byte before that range to the end of its file. A worker skips the header line at a file start or the partial row before its range, searching only its own range, and completes its last owned row past the range end. Largest-first ranking and buffer estimates use the range length, and one page from the first chunk with rows sets the row-rate estimate. Nothing touches cold data before the workers and the prefetcher read it; the previous reader paged in the bytes around every chunk boundary and the first page of every chunk one at a time.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| prefetch | 0.503 / 3.905 | 0.080 / 0.521 | 0.180 / 1.316 | 0.093 / 0.728 | 0.137 / 1.060 | 0.001 / 0.001 | 0.008 / 0.015 | 1.020 / 7.642 | 2.77 |
+| rawchunks | 0.499 / 3.819 | 0.063 / 0.422 | 0.162 / 1.210 | 0.088 / 0.668 | 0.130 / 1.005 | 0.001 / 0.001 | 0.008 / 0.017 | 0.964 / 7.150 | 2.79 |
+
+**Kept.** Cold 20M medians of five, alternating with `bb4b972`: 1.371 vs 1.660 s and 1.329 vs 1.717 s. Cold startup through links fell from about 0.91 to 0.10 s; cold parse now waits on the disk (0.77–0.84 s). Warm: five pairs 1.020 to 0.964 s on a loaded host, screen 0.944 to 0.930 s. A unit test splits files at every range size from 1 byte to 1 MiB, with header variants, rows longer than many ranges, empty rows, quotes, bare CR, UTF-8, an empty file and an unterminated last row, and compares rows and absolute offsets with the reference reader.
