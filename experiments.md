@@ -374,3 +374,16 @@ Create a second exact catalog index for keys that fit into seven bytes plus leng
 | dims | 0.526 / 3.691 | 0.052 / 0.346 | 0.155 / 1.031 | 0.265 / 1.964 | 0.377 / 2.675 | 0.076 / 0.465 | 0.001 / 0.002 | 1.599 / 10.385 | 3.09 |
 
 **Reverted.** The extra index did not reduce parse time and increased end-to-end latency.
+
+### R3-LINEAR
+
+Replace the local Swiss alias table and separate root array with a two-thirds-full linear-probing table. Each slot holds the exact packed key, a hash tag and the canonical person together.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.559 / 3.828 | 0.048 / 0.304 | 0.125 / 0.843 | 0.252 / 1.784 | 0.378 / 2.662 | 0.077 / 0.508 | 0.001 / 0.002 | 1.565 / 10.165 | 3.03 |
+| linear | 0.556 / 3.848 | 0.047 / 0.307 | 0.131 / 0.894 | 0.272 / 2.046 | 0.395 / 2.800 | 0.075 / 0.459 | 0.001 / 0.002 | 1.611 / 10.623 | 3.07 |
+
+**Reverted.** Resolving all rows cost more CPU and the end-to-end wall median rose.
