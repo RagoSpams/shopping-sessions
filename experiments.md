@@ -625,3 +625,16 @@ Run event deduplication and click parsing concurrently with `rayon::join` instea
 Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `648cac5`: the joined phase took 0.174 s against 0.094 s of dedup plus about 0.08 s of click parsing in sequence; end to end 0.890 vs 1.018 s and 6.50 vs 7.47 CPU-s.
 
 **Reverted.** The two parallel phases contended for the same eight workers rather than filling each other's idle tails.
+
+### R3-IDS128
+
+Split deduplication into 128 ID partitions instead of 64. Each partition's seen and repeated bitmaps shrink from 512 to 256 KiB at the same bits per ticket, so both fit within one hyperthread's share of L2.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| resolve2 | 0.387 / 2.943 | 0.048 / 0.283 | 0.080 / 0.552 | 0.092 / 0.704 | 0.169 / 1.336 | 0.001 / 0.001 | 0.005 / 0.006 | 0.804 / 5.865 | 2.86 |
+| ids128 | 0.389 / 3.013 | 0.045 / 0.281 | 0.066 / 0.458 | 0.089 / 0.685 | 0.169 / 1.337 | 0.001 / 0.001 | 0.004 / 0.006 | 0.774 / 5.783 | 2.87 |
+
+**Kept.** Dedup fell from 0.080 to 0.066 s with no parse cost from the extra ticket streams; end to end 0.804 to 0.774 s in five pairs (screen 0.790 to 0.775 s).
