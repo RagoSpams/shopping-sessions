@@ -1,0 +1,11 @@
+dev/
+data/
+datasets/
+s[0-9]*-[0-9]*/
+out/
+dev-out/
+dev-scratch/
+.venv/
+dev-answer
+__pycache__/
+target/

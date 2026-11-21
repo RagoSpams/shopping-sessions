@@ -30,3 +30,33 @@ run-dev: build
 ANSWER ?= dev-answer
 check-dev:
 	python3 scripts/compare.py out $(ANSWER)
+
+PY ?= $(HOME)/shopping/.venv/bin/python
+DATA_ROOT ?= $(HOME)/shopping/data
+GEN ?= $(HOME)/shopping/generator/target/release/generate
+DEV_ANSWER ?= $(HOME)/shopping/dev-answer
+
+.PHONY: fixtures-local dev-local run-dev-local check-dev-local gen-local
+
+fixtures-local:
+	@scratch=$$(mktemp -d) && \
+	trap 'rm -rf -- "$$scratch"' EXIT && \
+	SCRATCH_DIR="$$scratch" "$(PY)" -B scripts/run_fixtures.py fixtures -- "$(PY)" -B pipeline/pipeline.py
+
+dev-local:
+	@if [ ! -f "$(DATA_ROOT)/dev/manifest.json" ]; then \
+		"$(GEN)" --seed 1 --events 1000000 --clicks 250000 --output "$(DATA_ROOT)/dev"; \
+	fi
+
+run-dev-local: dev-local
+	rm -rf -- "$(DATA_ROOT)/dev-out" "$(DATA_ROOT)/dev-scratch"
+	mkdir -p "$(DATA_ROOT)/dev-out" "$(DATA_ROOT)/dev-scratch"
+	DATA_DIR="$(DATA_ROOT)/dev" OUTPUT_DIR="$(DATA_ROOT)/dev-out" SCRATCH_DIR="$(DATA_ROOT)/dev-scratch" \
+		NCPU=8 MEM_GB=24 time -p "$(PY)" -B pipeline/pipeline.py
+
+check-dev-local:
+	"$(PY)" -B scripts/compare.py "$(DATA_ROOT)/dev-out" "$(DEV_ANSWER)"
+
+gen-local:
+	"$(GEN)" --seed "$(SEED)" --events "$(EVENTS)" --clicks "$(CLICKS)" \
+		--output "$(DATA_ROOT)/s$(SEED)-$(EVENTS)"
