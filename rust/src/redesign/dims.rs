@@ -63,7 +63,7 @@ impl Dimension {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn get(&self, name: &[u8]) -> u32 {
         let Some(word) = PackedKey::word(name).filter(|&word| word != 0) else {
             return self.bytes.get(name).copied().unwrap_or(self.missing);

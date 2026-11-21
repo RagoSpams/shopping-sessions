@@ -705,3 +705,16 @@ Three interleaved single runs per size against `af53ca3` code: 8 threads 0.89 (f
 Measured on `aaf2481` before any provisioning change. During a 20M run the process held 0.93–1.02 GB of anonymous memory, of which 0.85–0.95 GB was on transparent huge pages; the system counted 612 huge-page faults and no fallbacks, so jemalloc's huge-page advice is already in effect. Later stages already reuse freed memory (event tickets, then click rows, resolve forwards and aggregation scratch), so the event parse's 672 MB of 16-byte rows and 16-byte tickets is the only large fresh allocation. On this host fresh huge pages cost about 0.69 CPU-s per GB of zeroing and host backing, about 0.46 CPU-s (0.06 s) inside event parsing, consistent with the earlier fresh-versus-reused parse comparison (0.35–0.41 vs 0.29–0.31 s). The startup join leaves about 0.065 idle thread-seconds (links: 0.29 CPU-s in 0.043–0.047 s on eight threads), enough to prefault about a third of those pages, hiding at most about 0.008 s. A helper that populated pages during parsing raised system time (R3-PROVISION).
 
 **Floor.** Further savings need fewer bytes per event row or ticket.
+
+### R3-INLINE
+
+Force inlining of the per-row helpers the release build kept out of line: the F1/F2 calendar decoder, packed-key hashing and exact key matching, and the catalog word lookup. A call from the parse, dedup or resolve loop spilled that loop's live registers.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| int4 | 0.455 / 3.484 | 0.058 / 0.382 | 0.182 / 1.354 | 0.089 / 0.666 | 0.117 / 0.910 | 0.001 / 0.001 | 0.005 / 0.007 | 0.944 / 7.027 | 2.77 |
+| inline1 | 0.414 / 3.145 | 0.049 / 0.340 | 0.147 / 1.091 | 0.078 / 0.603 | 0.110 / 0.856 | 0.001 / 0.001 | 0.005 / 0.007 | 0.815 / 6.080 | 2.76 |
+
+**Kept.** All five pairs favored the inlined build on a loaded host: 0.944 to 0.815 s end to end and 7.03 to 6.08 CPU-s, with parse, dedup and resolve each faster. The three-pair screen gave 0.832 to 0.777 s.

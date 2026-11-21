@@ -18,7 +18,9 @@ impl Calendar {
         )
     }
 
-    #[inline]
+    // Called for every event and click row; a call would spill the parse
+    // loop's live registers.
+    #[inline(always)]
     pub fn read(&mut self, value: &[u8]) -> Option<i64> {
         let zone = match value {
             [.., b'Z'] if value.len() == 20 => 0,

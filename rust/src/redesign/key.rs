@@ -96,13 +96,13 @@ impl PackedKey {
         (field.strip_suffix(b"\"").unwrap_or(field), index)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn matches(self, other: Self, chunks: &[Mmap]) -> bool {
         self == other
             || (self.0 & other.0 & MAPPED != 0 && self.mapped(chunks).0 == other.mapped(chunks).0)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn hash(self, state: &RandomState, chunks: &[Mmap]) -> u64 {
         if self.0 & MAPPED == 0 {
             // One folded 64x64-bit product mixes every input bit into both
