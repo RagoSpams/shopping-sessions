@@ -671,3 +671,11 @@ Keep every copy of a click and skip click deduplication. The rules give copies i
 Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Screen against `af53ca3`: 0.777 vs 0.736 s end to end; parse 0.403 vs 0.367 s; dedup 0.070 vs 0.055 s; aggregate 0.150 vs 0.169 s. Two five-pair series: 0.816 vs 0.829 s and 0.833 vs 0.812 s; pooled ten-run medians 0.8245 vs 0.8205 s. Dedup fell by 0.010–0.015 s in every series.
 
 **Reverted pending confirmation.** The end-to-end gain did not survive the ten-pair series. Click parsing, dedup and resolve now belong to the shop-r3-out lane, which can combine this with packed click words.
+
+### R3-LINKRESERVE
+
+Reserve each link worker's endpoint lists from the link input size, and size every link directory for all of its endpoints at two-thirds load before interning.
+
+Screen against `af53ca3`: 36/36 fixtures, dev and s3-3m MATCH. Two three-pair series: links 0.047 vs 0.047 s and 0.045 vs 0.049 s; resolve 0.095 vs 0.087 s and 0.091 vs 0.092 s; end to end 0.788 vs 0.783 s and 0.781 vs 0.810 s.
+
+**Reverted.** Link CPU fell 8% in the first series, but neither series moved the links wall time and the second reversed the end-to-end result.
