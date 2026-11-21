@@ -3,7 +3,7 @@ use crate::key::Key;
 use memmap2::Mmap;
 use parquet::errors::Result;
 use rayon::prelude::*;
-use shopping_sessions::aggregate::{self, Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow};
+use shopping_sessions::aggregate::{UserDay, Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow};
 use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
 use std::{fs, io};
@@ -119,13 +119,30 @@ pub struct CampaignColumns {
     assisted_sessions: Vec<i64>,
 }
 
+struct Groups<T> {
+    rows: Vec<T>,
+    ends: Vec<usize>,
+}
+
+impl<T> Groups<T> {
+    fn groups(&self) -> impl Iterator<Item = &[T]> {
+        let mut start = 0;
+        self.ends.iter().map(move |&end| {
+            let rows = &self.rows[start..end];
+            start = end;
+            rows
+        })
+    }
+}
+
 // Person IDs are dense indices into this shard's name vector. Count their
 // rows first so each person has a contiguous range for the timestamp sort.
-fn order_people<T: Copy>(
+fn order_people<T, U: Copy, K: Ord>(
     runs: Vec<Vec<PersonRow<T>>>,
     people: usize,
-    time: impl Fn(&T) -> i64,
-) -> Vec<PersonRow<T>> {
+    encode: impl Fn(T) -> U,
+    key: impl Fn(&U) -> K,
+) -> Groups<U> {
     let mut ends = vec![0; people];
     for run in &runs {
         for row in run {
@@ -138,12 +155,12 @@ fn order_people<T: Copy>(
         *cursor = total;
         total += count;
     }
-    let mut rows: Vec<PersonRow<T>> = Vec::with_capacity(total);
+    let mut rows: Vec<U> = Vec::with_capacity(total);
     let dest = rows.spare_capacity_mut();
     for run in runs {
         for row in run {
             let cursor = &mut ends[row.person as usize];
-            dest[*cursor].write(row);
+            dest[*cursor].write(encode(row.data));
             *cursor += 1;
         }
     }
@@ -151,11 +168,11 @@ fn order_people<T: Copy>(
     // The second pass wrote exactly those rows and initialized the full vector.
     unsafe { rows.set_len(total) };
     let mut start = 0;
-    for end in ends {
-        rows[start..end].sort_unstable_by_key(|row| time(&row.data));
+    for &end in &ends {
+        rows[start..end].sort_unstable_by_key(&key);
         start = end;
     }
-    rows
+    Groups { rows, ends }
 }
 
 pub fn aggregate(
@@ -176,6 +193,7 @@ pub fn aggregate(
         .chunks(size)
         .map(|parts| -> Result<_> {
             let mut daily = UserColumns::default();
+            let mut user_day = UserDay::default();
             let mut totals = Totals::new(window, campaigns.values.len());
             let mut attribution = Attribution::new(chunks, campaigns.values.len());
             for (shard, (events, clicks)) in parts {
@@ -183,10 +201,9 @@ pub fn aggregate(
                     continue;
                 }
                 let people = names[shard].len();
-                let events = order_people(events, people, |event| event.time);
-                let clicks = order_people(clicks, people, |click| click.time);
-                aggregate::process(
-                    |id, day, sessions, count, revenue, top| {
+                let events = order_people(events, people, |e| e, |e| e.time);
+                let clicks = order_people(clicks, people, |c| c, |c| c.time);
+                let mut emit = |id: u32, day, sessions, count, revenue, top: Option<u32>| {
                         daily.user_id.push(names[shard][id as usize].bytes(chunks));
                         daily.day.push(day);
                         daily.sessions.push(sessions);
@@ -203,12 +220,15 @@ pub fn aggregate(
                             daily.top_category.push(&[]);
                         }
                         Ok(())
-                    },
-                    &events,
-                    &clicks,
-                    &mut attribution,
-                    &mut totals,
-                )?;
+                    };
+                for (person, (events, clicks)) in events.groups().zip(clicks.groups()).enumerate() {
+                    if !events.is_empty() {
+                        user_day.process_person(
+                            person as u32, events, |event| *event, clicks,
+                            &mut attribution, &mut totals, &mut emit,
+                        )?;
+                    }
+                }
             }
             Ok((daily, totals))
         })

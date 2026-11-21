@@ -3,6 +3,7 @@ use crate::output::CampaignDay;
 use crate::time::{DAY_MS, LOOKBACK_MS, SESSION_GAP_MS};
 use ahash::AHashMap;
 use memmap2::Mmap;
+use std::borrow::Borrow;
 use parquet::errors::Result;
 
 pub struct PersonRow<T> {
@@ -22,6 +23,12 @@ pub struct Click {
     pub time: i64,
     pub campaign: u32,
     pub location: Location,
+}
+
+impl Borrow<Click> for PersonRow<Click> {
+    fn borrow(&self) -> &Click {
+        &self.data
+    }
 }
 
 pub type CampaignDays = AHashMap<(u32, i32), CampaignDay>;
@@ -73,9 +80,9 @@ impl<'a> Attribution<'a> {
         self.latest = None;
     }
 
-    fn advance(&mut self, start: i64, clicks: &[PersonRow<Click>]) {
+    fn advance(&mut self, start: i64, clicks: &[impl Borrow<Click>]) {
         while let Some(row) = clicks.get(self.right) {
-            let click = row.data;
+            let click = *row.borrow();
             if click.time > start {
                 break;
             }
@@ -93,8 +100,8 @@ impl<'a> Attribution<'a> {
             slot.count += 1;
             self.right += 1;
         }
-        while self.left < self.right && clicks[self.left].data.time < start - LOOKBACK_MS {
-            let campaign = clicks[self.left].data.campaign;
+        while self.left < self.right && clicks[self.left].borrow().time < start - LOOKBACK_MS {
+            let campaign = clicks[self.left].borrow().campaign;
             let slot = &mut self.campaigns[campaign as usize];
             slot.count -= 1;
             if slot.count == 0 {
@@ -110,7 +117,7 @@ impl<'a> Attribution<'a> {
 
     fn credit(
         &mut self,
-        clicks: &[PersonRow<Click>],
+        clicks: &[impl Borrow<Click>],
         start: i64,
         day: i32,
         revenue: i64,
@@ -133,7 +140,7 @@ impl<'a> Attribution<'a> {
 }
 
 #[derive(Default)]
-struct UserDay {
+pub struct UserDay {
     sessions: i64,
     events: i64,
     revenue: i64,
@@ -170,6 +177,51 @@ impl UserDay {
         self.categories.clear();
         Ok(())
     }
+
+    /// Process one nonempty timestamp-ordered event range and its sorted clicks.
+    pub fn process_person<T>(
+        &mut self,
+        person: u32,
+        mut events: &[T],
+        decode: impl Fn(&T) -> Event,
+        clicks: &[impl Borrow<Click>],
+        attribution: &mut Attribution<'_>,
+        campaign_days: &mut impl CampaignTotals,
+        emit: &mut impl FnMut(u32, i32, i64, i64, i64, Option<u32>) -> Result<()>,
+    ) -> Result<()> {
+        attribution.reset();
+        let mut day = decode(&events[0]).time.div_euclid(DAY_MS) as i32;
+        while let Some(first) = events.first() {
+            let start = decode(first).time;
+            let session_day = start.div_euclid(DAY_MS) as i32;
+            if session_day != day {
+                self.write(emit, person, day)?;
+                day = session_day;
+            }
+            let mut previous = start;
+            let mut count = 0;
+            let mut revenue = 0;
+            for row in events {
+                let event = decode(row);
+                if event.time - previous > SESSION_GAP_MS {
+                    break;
+                }
+                previous = event.time;
+                count += 1;
+                if event.price != 0 {
+                    let price = i64::from(event.price);
+                    revenue += price;
+                    self.add_purchase(event.category, price);
+                }
+            }
+            self.sessions += 1;
+            self.events += count as i64;
+            self.revenue += revenue;
+            attribution.credit(clicks, start, day, revenue, campaign_days);
+            events = &events[count..];
+        }
+        self.write(emit, person, day)
+    }
 }
 
 pub fn process(
@@ -180,7 +232,7 @@ pub fn process(
     campaign_days: &mut impl CampaignTotals,
 ) -> Result<()> {
     let mut daily = UserDay::default();
-    for mut events in events.chunk_by(|a, b| a.person == b.person) {
+    for events in events.chunk_by(|a, b| a.person == b.person) {
         let person = events[0].person;
         if clicks.first().is_some_and(|row| row.person < person) {
             clicks = &clicks[clicks.partition_point(|row| row.person < person)..];
@@ -192,38 +244,7 @@ pub fn process(
         };
         let (matched, rest) = clicks.split_at(end);
         clicks = rest;
-        attribution.reset();
-        let mut day = events[0].data.time.div_euclid(DAY_MS) as i32;
-        while let Some(first) = events.first() {
-            let start = first.data.time;
-            let session_day = start.div_euclid(DAY_MS) as i32;
-            if session_day != day {
-                daily.write(&mut emit, person, day)?;
-                day = session_day;
-            }
-            let mut previous = start;
-            let mut count = 0;
-            let mut revenue = 0;
-            for row in events {
-                let event = &row.data;
-                if event.time - previous > SESSION_GAP_MS {
-                    break;
-                }
-                previous = event.time;
-                count += 1;
-                if event.price != 0 {
-                    let price = i64::from(event.price);
-                    revenue += price;
-                    daily.add_purchase(event.category, price);
-                }
-            }
-            daily.sessions += 1;
-            daily.events += count as i64;
-            daily.revenue += revenue;
-            attribution.credit(matched, start, day, revenue, campaign_days);
-            events = &events[count..];
-        }
-        daily.write(&mut emit, person, day)?;
+        daily.process_person(person, events, |r| r.data, matched, attribution, campaign_days, &mut emit)?;
     }
     Ok(())
 }
