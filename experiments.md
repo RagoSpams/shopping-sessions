@@ -438,3 +438,16 @@ Increase the user fanout from 32 to 128 after introducing batched linear alias p
 | user128 | 0.590 / 4.157 | 0.047 / 0.288 | 0.149 / 0.960 | 0.170 / 1.270 | 0.383 / 2.574 | 0.086 / 0.556 | 0.001 / 0.002 | 1.559 / 9.743 | 3.13 |
 
 **Kept.** The smaller directories reduced resolve CPU and end-to-end wall.
+
+### R3-HANDLES
+
+Write every parsed row to one contiguous per-worker vector. Replace the user key with a per-worker handle, deduplicated through a 16,384-entry direct-mapped recent-user cache. After dedup, route only the handle aliases to the user directories, then scatter rows by person through a handle-to-root array.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user128 | 0.598 / 4.139 | 0.051 / 0.340 | 0.141 / 0.951 | 0.186 / 1.305 | 0.346 / 2.429 | 0.082 / 0.515 | 0.001 / 0.002 | 1.551 / 10.083 | 3.11 |
+| handles | 0.772 / 5.484 | 0.044 / 0.284 | 0.135 / 0.943 | 0.397 / 2.450 | 0.370 / 2.586 | 0.080 / 0.513 | 0.001 / 0.003 | 1.885 / 12.347 | 3.57 |
+
+**Reverted.** The recent-user cache missed on 21.0M of 26.2M rows, so nearly every row still produced an alias. Parse rose from 0.598 to 0.772 s and resolve from 0.186 to 0.397 s.
