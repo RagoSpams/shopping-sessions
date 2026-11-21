@@ -218,3 +218,16 @@ A separate paired run compares the cumulative candidate to the calibration ELF. 
 The cumulative improvement triggered the container gate.
 
 The root image for `53b6ea0` built in 53.61 s with the cached pinned Rust 1.90.0 base. It runs the static redesign in scratch as UID/GID 1000. With scorer isolation, CPUs 0–7 and NCPU=8 it passed 36/36 fixtures and all five frozen comparisons. The timed 20M output also matched. Docker wall median was 2.468 s, range 2.351–3.164 s, five after one warmup. The final five-pair native comparison was 3.979 to 3.199 s (19.6%) under shared load.
+
+### R3-DIRECTCLICK
+
+Route validated identical-copy clicks straight to user partitions. Duplicate multiplicity leaves both latest-click credit and the set of assisting campaigns unchanged.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.853 / 4.258 | 0.086 / 0.264 | 0.495 / 2.310 | 0.352 / 1.303 | 0.602 / 2.755 | 0.134 / 0.476 | 0.001 / 0.002 | 2.767 / 11.676 | 3.37 |
+| directclick | 0.825 / 4.174 | 0.074 / 0.290 | 0.378 / 1.853 | 0.313 / 1.278 | 0.772 / 2.990 | 0.158 / 0.510 | 0.003 / 0.002 | 2.922 / 11.705 | 3.32 |
+
+**Reverted.** The initial five-pair wall median increased. A second five-pair series measured 3.089 → 3.027 s, but the pooled ten-run medians were 2.928 → 2.930 s. CPU medians were 11.828 → 11.508 s. The wall gate was unmet.
