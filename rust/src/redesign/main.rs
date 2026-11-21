@@ -58,12 +58,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             ))
         },
         || -> std::io::Result<_> {
+            // Link parsing needs only the link chunks, so the event and click
+            // files are mapped meanwhile. Link chunks stay first.
             let mut chunks = read_chunks(&input.join("links"), LINK_CHUNK)?;
             let links_end = chunks.len();
-            chunks.extend(read_chunks(&input.join("events"), CHUNK)?);
+            let (link_batch, others) = rayon::join(
+                || links::parse(&chunks, 0..links_end, &hash),
+                || -> std::io::Result<_> {
+                    let events = read_chunks(&input.join("events"), CHUNK)?;
+                    let clicks = read_chunks(&input.join("clicks"), SMALL_CHUNK)?;
+                    Ok((events, clicks))
+                },
+            );
+            let (events, clicks) = others?;
+            chunks.extend(events);
             let events_end = chunks.len();
-            chunks.extend(read_chunks(&input.join("clicks"), SMALL_CHUNK)?);
-            let link_batch = links::parse(&chunks, 0..links_end, &hash);
+            chunks.extend(clicks);
             let directory = links::build(link_batch, &chunks);
             Ok((chunks, links_end, events_end, directory))
         },
