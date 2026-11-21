@@ -164,3 +164,16 @@ Reduce initial record-ID radix fanout from 1,024 to 64 after adopting selective 
 | coarse | 0.684 / 4.968 | 0.038 / 0.242 | 0.402 / 3.015 | 0.185 / 1.302 | 0.393 / 2.585 | 0.079 / 0.515 | 0.001 / 0.002 | 1.939 / 12.722 | 3.69 |
 
 **Kept.** The lower parse cost outweighed the larger partition-local candidate tables. Calibration scored 2.28 s on the board. The local native target is about 0.85 s.
+
+### R3-WIDEKEY
+
+Build each short inline key from a masked 16-byte SIMD load when all 16 bytes lie in the mapping. Retain the scalar copy at the tail.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| coarse | 0.718 / 5.088 | 0.041 / 0.251 | 0.456 / 3.323 | 0.195 / 1.335 | 0.393 / 2.709 | 0.084 / 0.543 | 0.001 / 0.002 | 2.019 / 13.511 | 3.71 |
+| widekey | 0.694 / 4.760 | 0.042 / 0.262 | 0.470 / 3.468 | 0.198 / 1.393 | 0.434 / 2.778 | 0.085 / 0.558 | 0.001 / 0.002 | 2.070 / 13.397 | 3.71 |
+
+**Reverted.** Parse CPU fell, but the five-pair end-to-end wall median increased.
