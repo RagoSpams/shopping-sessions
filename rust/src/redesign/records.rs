@@ -1,12 +1,13 @@
 use crate::buckets::{self, IDS, Partitions, Runs, USERS, bucket};
 use crate::key::Key;
+use crate::scan::rows;
 use ahash::RandomState;
 use hashbrown::{HashTable, hash_table::Entry};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{Click, Event};
 use shopping_sessions::catalog::{Campaigns, Products};
-use shopping_sessions::csv::{Location, csv, lines};
+use shopping_sessions::csv::Location;
 use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window, bounded_uint, calendar_ms};
 use std::ops::Range;
 
@@ -64,10 +65,7 @@ pub fn parse_events(
         || buckets::empty(IDS),
         |out, i| {
             let chunk = &chunks[i];
-            for (_, line) in lines(chunk) {
-                let Some([id, user, ts, ingest, kind, product, price]) = csv::<7>(line) else {
-                    continue;
-                };
+            for (_, [id, user, ts, ingest, kind, product, price]) in rows::<7>(chunk) {
                 if id.is_empty() {
                     continue;
                 }
@@ -127,10 +125,7 @@ pub fn parse_clicks(
         || buckets::empty(IDS),
         |out, i| {
             let chunk = &chunks[i];
-            for (offset, line) in lines(chunk) {
-                let Some([id, user, campaign, ts]) = csv::<4>(line) else {
-                    continue;
-                };
+            for (offset, [id, user, campaign, ts]) in rows::<4>(chunk) {
                 if id.is_empty() {
                     continue;
                 }

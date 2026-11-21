@@ -51,3 +51,26 @@ Native and Docker use the same static Rust 1.90 ELF. Hyperfine 2.0.0, five measu
 | **End to end** | **0.550 wall / 3.500 CPU** | **2.329** | **15.601** | **3.063** | **15.545** |
 
 M1 peak RSS at 20M was 3.82 GiB. Seed 6 at 60M took 22.52 s wall, 105.20 CPU-s and 9.49 GiB peak RSS. Both 60M tables matched the earlier validated Rust output, with 6,604,995 user/day and 28,014 campaign/day rows. That additional comparison is independent of the five frozen reference datasets.
+
+### Focused parse experiment and M2 stopping gate
+
+| ID | Change | Correctness | Local 20M median | Disposition |
+|---|---|---|---|---|
+| R2-SCAN | Fuse newline, comma and quote detection in 32-byte AVX2 loads. BMI2 packs the opening and closing quote flags per field. Long lines and mapping tails use the existing exact parser. | Scanner boundary test PASS. 36/36 fixtures and all five frozen datasets MATCH. PyArrow read every output part. Both timed outputs MATCH. | Native 2.174 s / 14.629 CPU-s. Docker 3.054 s / 15.603 in-program CPU-s. Five alternating native pairs below confirm lower parse and end-to-end times. | Kept alongside default. M2 stopped at the parse gate. |
+
+| 20M stage | Native wall target | M2 maximum (2×) | Native wall | Native CPU | Docker wall | Docker CPU |
+|---|---:|---:|---:|---:|---:|---:|
+| Parse, map, dimensions and first scatter | 0.220 | 0.440 | 0.828 | 6.049 | 0.949 | 6.399 |
+| Links | 0.030 | 0.060 | 0.045 | 0.286 | 0.041 | 0.247 |
+| Dedup, validate and late | 0.070 | 0.140 | 0.435 | 3.113 | 0.471 | 3.212 |
+| Resolve and scatter by person | 0.070 | 0.140 | 0.204 | 1.347 | 0.240 | 1.522 |
+| Sort, sessions, credit and aggregates | 0.100 | 0.200 | 0.441 | 3.067 | 0.509 | 3.274 |
+| Parquet fallback | 0.030 | 0.060 | 0.098 | 0.667 | 0.119 | 0.826 |
+| Startup and exit including pool setup | 0.020 | 0.040 | 0.147 | — | 0.760 | — |
+| **Total** | **0.550 wall / 3.500 CPU** | | **2.174** | **14.629** | **3.054** | **15.603** |
+
+The separate native median-of-five runs put M1 parse at 0.923 s and R2-SCAN at 0.828 s. A second comparison alternated which ELF ran first in each pair, with five measurements each after warming both. M1 → R2-SCAN medians were 2.695 → 2.542 s end to end, 15.409 → 14.376 CPU-s, and 1.004 → 0.883 s for parse/scatter. Four of five pairs favored the new scanner on wall time. Docker host-wall medians differed by 0.009 s in the separate series, below the observed run-to-run variation.
+
+The focused scanner still used **1.88× the 0.440 s M2 cutoff** in its five-run series. Its parse phase alone took 6.049 CPU-s against the 3.500 CPU-s total target. M1 is exact. M2 and M3 remain unmet. Further optimization stopped at the specified gate. The 0.90 s board target remains unmeasured.
+
+The final 60M check took 10.55 s wall and 67.90 CPU-s at 10.02 GiB peak RSS. Its complete output matched the prior validated 60M output. These are single runs with uncontrolled cache residency at 60M. The shared-code default binary also passed 36 fixtures and all five frozen oracle comparisons. The additional long-ID and CSV-boundary dataset matched the M1 redesign.

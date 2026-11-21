@@ -1,12 +1,12 @@
 use crate::buckets::{self, Partitions, Runs, USERS, bucket};
 use crate::key::Key;
 use crate::records::Named;
+use crate::scan::rows;
 use ahash::RandomState;
 use hashbrown::HashTable;
 use memmap2::Mmap;
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{Click, Event, PersonRow};
-use shopping_sessions::csv::{csv, lines};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -31,10 +31,7 @@ pub fn parse(chunks: &[Mmap], range: Range<usize>, state: &RandomState) -> Vec<L
         },
         |batch, i| {
             let chunk = &chunks[i];
-            for (_, line) in lines(chunk) {
-                let Some([left, right]) = csv::<2>(line) else {
-                    continue;
-                };
+            for (_, [left, right]) in rows::<2>(chunk) {
                 if left.is_empty() || right.is_empty() {
                     continue;
                 }

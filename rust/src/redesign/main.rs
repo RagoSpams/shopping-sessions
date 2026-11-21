@@ -2,6 +2,7 @@ mod buckets;
 mod key;
 mod links;
 mod records;
+mod scan;
 mod tables;
 mod timing;
 
