@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &chunks,
         &products,
         &campaigns,
+        window,
     )?;
     timer.end(Stage::Aggregate);
     tables::write(&output, &users, &daily)?;

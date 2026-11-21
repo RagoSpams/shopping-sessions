@@ -3,11 +3,69 @@ use crate::key::Key;
 use memmap2::Mmap;
 use parquet::errors::Result;
 use rayon::prelude::*;
-use shopping_sessions::aggregate::{self, Attribution, CampaignDays, Click, Event, PersonRow};
+use shopping_sessions::aggregate::{self, Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow};
 use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
 use std::{fs, io};
 use std::path::Path;
+
+use shopping_sessions::output::CampaignDay;
+use shopping_sessions::time::{DAY_MS, Window};
+
+// Limit scratch per worker for long windows or large campaign catalogs.
+enum Totals {
+    Dense { first: i32, campaigns: usize, rows: Vec<CampaignDay> },
+    Sparse(CampaignDays),
+}
+
+impl Totals {
+    fn new(window: Window, campaigns: usize) -> Self {
+        let first = window.start.div_euclid(DAY_MS) as i32;
+        let last = (window.end - 1).div_euclid(DAY_MS) as i32;
+        let days = (i64::from(last) - i64::from(first) + 1).max(0) as usize;
+        if let Some(size) = days.checked_mul(campaigns)
+            .filter(|&n| n <= (8 << 20) / size_of::<CampaignDay>())
+        {
+            Self::Dense {
+                first,
+                campaigns,
+                rows: std::iter::repeat_with(CampaignDay::default).take(size).collect(),
+            }
+        } else {
+            Self::Sparse(CampaignDays::new())
+        }
+    }
+
+    fn merge_into(self, all: &mut CampaignDays) {
+        match self {
+            Self::Dense { first, campaigns, rows } => {
+                for (index, totals) in rows.into_iter().enumerate() {
+                    if totals.sessions != 0 || totals.assists != 0 {
+                        let key = ((index % campaigns) as u32, first + (index / campaigns) as i32);
+                        all.entry(key).or_default().merge(totals);
+                    }
+                }
+            }
+            Self::Sparse(rows) => {
+                for (key, totals) in rows {
+                    all.entry(key).or_default().merge(totals);
+                }
+            }
+        }
+    }
+}
+
+impl CampaignTotals for Totals {
+    #[inline]
+    fn daily(&mut self, campaign: u32, day: i32) -> &mut CampaignDay {
+        match self {
+            Self::Dense { first, campaigns, rows } => {
+                &mut rows[(day - *first) as usize * *campaigns + campaign as usize]
+            }
+            Self::Sparse(rows) => rows.daily(campaign, day),
+        }
+    }
+}
 
 struct TextColumn {
     offsets: Vec<usize>,
@@ -107,6 +165,7 @@ pub fn aggregate(
     chunks: &[Mmap],
     products: &Products,
     campaigns: &Campaigns,
+    window: Window,
 ) -> Result<(Vec<UserColumns>, CampaignColumns)> {
     let parallelism = rayon::current_num_threads().min(USERS);
     let size = USERS.div_ceil(parallelism);
@@ -117,7 +176,7 @@ pub fn aggregate(
         .chunks(size)
         .map(|parts| -> Result<_> {
             let mut daily = UserColumns::default();
-            let mut totals = CampaignDays::new();
+            let mut totals = Totals::new(window, campaigns.values.len());
             let mut attribution = Attribution::new(chunks, campaigns.values.len());
             for (shard, (events, clicks)) in parts {
                 if events.is_empty() {
@@ -158,9 +217,7 @@ pub fn aggregate(
     let mut all = CampaignDays::new();
     for (daily, totals) in parts {
         users.push(daily);
-        for (key, day) in totals {
-            all.entry(key).or_default().merge(day);
-        }
+        totals.merge_into(&mut all);
     }
     let mut campaign = CampaignColumns::default();
     for ((id, day), x) in all {

@@ -26,6 +26,17 @@ pub struct Click {
 
 pub type CampaignDays = AHashMap<(u32, i32), CampaignDay>;
 
+pub trait CampaignTotals {
+    fn daily(&mut self, campaign: u32, day: i32) -> &mut CampaignDay;
+}
+
+impl CampaignTotals for CampaignDays {
+    #[inline]
+    fn daily(&mut self, campaign: u32, day: i32) -> &mut CampaignDay {
+        self.entry((campaign, day)).or_default()
+    }
+}
+
 #[derive(Default)]
 struct ActiveCampaign {
     count: usize,
@@ -103,7 +114,7 @@ impl<'a> Attribution<'a> {
         start: i64,
         day: i32,
         revenue: i64,
-        campaign_days: &mut CampaignDays,
+        campaign_days: &mut impl CampaignTotals,
     ) {
         self.advance(start, clicks);
         let campaign = if self.active.is_empty() {
@@ -111,12 +122,12 @@ impl<'a> Attribution<'a> {
         } else {
             self.latest.unwrap().campaign
         };
-        let totals = campaign_days.entry((campaign, day)).or_default();
+        let totals = campaign_days.daily(campaign, day);
         totals.sessions += 1;
         totals.purchasing += i64::from(revenue > 0);
         totals.revenue += revenue;
         for &campaign in &self.active {
-            campaign_days.entry((campaign, day)).or_default().assists += 1;
+            campaign_days.daily(campaign, day).assists += 1;
         }
     }
 }
@@ -166,7 +177,7 @@ pub fn process(
     events: &[PersonRow<Event>],
     mut clicks: &[PersonRow<Click>],
     attribution: &mut Attribution<'_>,
-    campaign_days: &mut CampaignDays,
+    campaign_days: &mut impl CampaignTotals,
 ) -> Result<()> {
     let mut daily = UserDay::default();
     for mut events in events.chunk_by(|a, b| a.person == b.person) {
