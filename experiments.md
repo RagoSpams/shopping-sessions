@@ -335,3 +335,16 @@ Specialize the guaranteed-valid F1 ingest path using the cached date and fixed c
 | ingest | 0.544 / 3.792 | 0.047 / 0.291 | 0.141 / 0.945 | 0.305 / 2.256 | 0.394 / 2.901 | 0.088 / 0.552 | 0.001 / 0.002 | 1.659 / 11.065 | 3.07 |
 
 **Reverted.** Parse showed only a small reduction and the locked end-to-end median rose.
+
+### R3-EPOCH
+
+For nine to sixteen decimal epoch digits, validate two overlapping words and combine four decimal pairs at a time. Other lengths retain the scalar parser.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.529 / 3.651 | 0.050 / 0.330 | 0.127 / 0.844 | 0.247 / 1.804 | 0.364 / 2.566 | 0.072 / 0.447 | 0.001 / 0.002 | 1.491 / 9.751 | 3.05 |
+| epoch | 0.524 / 3.662 | 0.048 / 0.289 | 0.136 / 0.928 | 0.250 / 1.827 | 0.402 / 2.795 | 0.079 / 0.492 | 0.001 / 0.002 | 1.541 / 10.119 | 3.07 |
+
+**Reverted.** Parse CPU was unchanged and end-to-end wall rose.
