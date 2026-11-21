@@ -375,6 +375,57 @@ Create a second exact catalog index for keys that fit into seven bytes plus leng
 
 **Reverted.** The extra index did not reduce parse time and increased end-to-end latency.
 
+### R3-LINEAR
+
+Replace the local Swiss alias table and separate root array with a two-thirds-full linear-probing table. Each slot holds the exact packed key, a hash tag and the canonical person together.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.559 / 3.828 | 0.048 / 0.304 | 0.125 / 0.843 | 0.252 / 1.784 | 0.378 / 2.662 | 0.077 / 0.508 | 0.001 / 0.002 | 1.565 / 10.165 | 3.03 |
+| linear | 0.556 / 3.848 | 0.047 / 0.307 | 0.131 / 0.894 | 0.272 / 2.046 | 0.395 / 2.800 | 0.075 / 0.459 | 0.001 / 0.002 | 1.611 / 10.623 | 3.07 |
+
+**Reverted.** Resolving all rows cost more CPU and the end-to-end wall median rose.
+
+### R3-IDPASS
+
+Make an event-ID-only CSV pass. Radix-partition eight-byte projection/offset tickets, validate candidate copies structurally, compare decoded IDs and F1 ingest timestamps exactly, then skip sorted loser offsets during the full parse. Only surviving rows enter the user scatter.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.880 / 4.919 | 0.078 / 0.325 | 0.233 / 1.188 | 0.467 / 2.652 | 0.550 / 3.288 | 0.099 / 0.512 | 0.002 / 0.002 | 2.496 / 12.852 | 3.05 |
+| prepass | 0.721 / 3.763 | 0.081 / 0.324 | 0.562 / 2.691 | 0.535 / 2.897 | 0.573 / 3.284 | 0.140 / 0.572 | 0.001 / 0.002 | 2.891 / 13.650 | 2.96 |
+
+**Reverted.** The second input pass and mapped byte checks cost more in dedup than the narrower full parse saved.
+
+### R3-SCALE follow-up · accepted ticket pipeline
+
+A diagnostic build of `572e871` used the same passive residency and stage counters as the calibration diagnostic. The 60M repeat matched both prior validated tables. These single-run measurements used the shared timing lock. Other host work still affected CPU speed.
+
+| Input/run | CSV pages resident before run | Wall s | User + system CPU-s | Peak RSS GiB | Major faults | Parse CPU-s | Dedup CPU-s | Resolve CPU-s | Sessions CPU-s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20M | 100.00% | 3.11 | 12.77 + 2.63 | 3.10 | 87 | 5.83 | 1.43 | 3.32 | 3.69 |
+| 60M first | 25.09% | 13.04 | 45.69 + 17.95 | 9.14 | 47,678 | 30.40 | 6.88 | 12.58 | 10.91 |
+| 60M repeat | 97.68% | 7.13 | 39.07 + 7.69 | 9.37 | 8,276 | 16.12 | 5.81 | 11.55 | 10.04 |
+
+The repeat reduced dedup from calibration's 14.42 to 5.81 CPU-s, while resolve rose from 5.51 to 11.55 CPU-s with the larger 32-way alias shards. Initial residency and host load differed between runs. A separate 20M resolve profile assigned 45.4% of user-mode samples to the Swiss table's find-or-insert-slot closure and 13.1% to the root fetch.
+
+### R3-PREFETCH
+
+Batch 32 row hashes and prefetch the corresponding exact linear alias slots before probing for canonical roots. This revisits the rejected linear table with independent outstanding memory requests.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.580 / 4.062 | 0.048 / 0.311 | 0.145 / 0.989 | 0.265 / 1.985 | 0.378 / 2.766 | 0.074 / 0.476 | 0.001 / 0.002 | 1.600 / 10.546 | 3.06 |
+| prefetch | 0.555 / 3.927 | 0.048 / 0.312 | 0.139 / 0.936 | 0.201 / 1.423 | 0.395 / 2.629 | 0.073 / 0.451 | 0.001 / 0.002 | 1.514 / 9.781 | 3.06 |
+
+**Kept.** Batched probing lowered both resolve CPU and wall and improved the full-process median.
+
 ## Output experiments on the partition-local redesign
 
 Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.

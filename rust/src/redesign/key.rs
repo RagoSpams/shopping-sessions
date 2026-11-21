@@ -37,7 +37,7 @@ impl Key {
 // Nine seven-bit characters fit into the low 63 bits of a word. Shorter
 // strings have implicit zero padding. A nonempty string ending in NUL uses
 // the mapped form so its length can never alias that padding.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct PackedKey(u64);
 
 const MAPPED: u64 = 1 << 63;
