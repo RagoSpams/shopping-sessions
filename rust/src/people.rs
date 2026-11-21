@@ -6,14 +6,39 @@ use std::path::Path;
 
 const UNLINKED: u32 = 1 << 31;
 
-#[derive(Clone, Copy)]
-struct Person {
-    shard: usize,
-    index: u32,
+#[derive(Default)]
+struct Aliases {
+    short: AHashMap<u128, u64>,
+    long: AHashMap<Box<[u8]>, u64>,
+}
+
+impl Aliases {
+    fn get(&self, name: &[u8]) -> Option<u64> {
+        match packed_name(name) {
+            Some(key) => self.short.get(&key).copied(),
+            None => self.long.get(name).copied(),
+        }
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut u64> {
+        self.short.values_mut().chain(self.long.values_mut())
+    }
+}
+
+// Reserve one byte for the length so the integer is an exact key even
+// when an ID contains zero bytes. Longer names use the byte-slice map.
+fn packed_name(name: &[u8]) -> Option<u128> {
+    if name.len() >= 16 {
+        return None;
+    }
+    let mut key = [0u8; 16];
+    key[..name.len()].copy_from_slice(name);
+    key[15] = name.len() as u8;
+    Some(u128::from_le_bytes(key))
 }
 
 pub struct People {
-    aliases: AHashMap<Box<[u8]>, Person>,
+    aliases: Aliases,
     hash: RandomState,
     pub names: Vec<Vec<Box<[u8]>>>,
 }
@@ -21,12 +46,11 @@ pub struct People {
 impl People {
     pub fn read(directory: &Path) -> io::Result<Self> {
         let mut people = Self {
-            aliases: AHashMap::new(),
+            aliases: Aliases::default(),
             hash: RandomState::new(),
             names: crate::input::empty_shards(),
         };
         let chunks = read_parts(directory)?;
-        let mut ids = AHashMap::new();
         let mut components = Vec::new();
         for chunk in &chunks {
             for (_, row) in lines(chunk) {
@@ -34,13 +58,13 @@ impl People {
                     && !first.is_empty()
                     && !second.is_empty()
                 {
-                    let left = link_id(&mut ids, &mut components, first);
-                    let right = link_id(&mut ids, &mut components, second);
+                    let left = link_id(&mut people.aliases, &mut components, first);
+                    let right = link_id(&mut people.aliases, &mut components, second);
                     join(&mut components, left, right);
                 }
             }
         }
-        let mut canonical = vec![None; components.len()];
+        let mut canonical = vec![0; components.len()];
         for (id, &component) in components.iter().enumerate() {
             if component.parent != id {
                 continue;
@@ -48,16 +72,15 @@ impl People {
             let name = component.minimum;
             let bucket = shard(people.hash.hash_one(name));
             let names = &mut people.names[bucket];
-            canonical[id] = Some(Person {
-                shard: bucket,
-                index: u32::try_from(names.len()).unwrap(),
-            });
+            let index = u32::try_from(names.len()).unwrap();
+            assert!(index < UNLINKED);
+            canonical[id] = (u64::from(index) << 32) | bucket as u64;
             names.push(name.into());
         }
-        people.aliases.reserve(ids.len());
-        for (name, id) in ids {
-            let person = canonical[root(&mut components, id)].unwrap();
-            people.aliases.insert(name.into(), person);
+        // The link interner already holds every alias. Rewrite each value
+        // in place to the shard and index of its component's minimum name.
+        for id in people.aliases.values_mut() {
+            *id = canonical[root(&mut components, *id as usize)];
         }
         Ok(people)
     }
@@ -71,19 +94,29 @@ struct Component<'a> {
 }
 
 fn link_id<'a>(
-    ids: &mut AHashMap<&'a [u8], usize>,
+    aliases: &mut Aliases,
     components: &mut Vec<Component<'a>>,
     name: &'a [u8],
 ) -> usize {
-    *ids.entry(name).or_insert_with(|| {
+    let mut add_component = || {
         let id = components.len();
         components.push(Component {
             parent: id,
             size: 1,
             minimum: name,
         });
+        id as u64
+    };
+    let id = if let Some(key) = packed_name(name) {
+        *aliases.short.entry(key).or_insert_with(add_component)
+    } else if let Some(&id) = aliases.long.get(name) {
         id
-    })
+    } else {
+        let id = add_component();
+        aliases.long.insert(name.into(), id);
+        id
+    };
+    id as usize
 }
 
 fn root(components: &mut [Component<'_>], mut id: usize) -> usize {
@@ -139,7 +172,7 @@ impl<T> Default for Batch<T> {
 impl<T> Batch<T> {
     pub fn push(&mut self, people: &People, name: &[u8], data: T) {
         let (partition, person) = if let Some(person) = people.aliases.get(name) {
-            (person.shard, person.index)
+            (person as u32 as usize, (person >> 32) as u32)
         } else {
             let hash = people.hash.hash_one(name);
             let bucket = shard(hash);
