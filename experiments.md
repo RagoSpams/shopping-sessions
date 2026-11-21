@@ -387,3 +387,16 @@ Replace the local Swiss alias table and separate root array with a two-thirds-fu
 | linear | 0.556 / 3.848 | 0.047 / 0.307 | 0.131 / 0.894 | 0.272 / 2.046 | 0.395 / 2.800 | 0.075 / 0.459 | 0.001 / 0.002 | 1.611 / 10.623 | 3.07 |
 
 **Reverted.** Resolving all rows cost more CPU and the end-to-end wall median rose.
+
+### R3-IDPASS
+
+Make an event-ID-only CSV pass. Radix-partition eight-byte projection/offset tickets, validate candidate copies structurally, compare decoded IDs and F1 ingest timestamps exactly, then skip sorted loser offsets during the full parse. Only surviving rows enter the user scatter.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.880 / 4.919 | 0.078 / 0.325 | 0.233 / 1.188 | 0.467 / 2.652 | 0.550 / 3.288 | 0.099 / 0.512 | 0.002 / 0.002 | 2.496 / 12.852 | 3.05 |
+| prepass | 0.721 / 3.763 | 0.081 / 0.324 | 0.562 / 2.691 | 0.535 / 2.897 | 0.573 / 3.284 | 0.140 / 0.572 | 0.001 / 0.002 | 2.891 / 13.650 | 2.96 |
+
+**Reverted.** The second input pass and mapped byte checks cost more in dedup than the narrower full parse saved.
