@@ -85,3 +85,30 @@ The final 60M check took 10.55 s wall and 67.90 CPU-s at 10.02 GiB peak RSS. Its
 The calibration keeps fastpq standalone and uses the redesign's existing Parquet output. The root Dockerfile uses the digest-pinned Rust 1.90.0 builder with `-C target-feature=+crt-static -C target-cpu=x86-64-v3`. The resulting `linux/amd64` image uses `FROM scratch` and runs as UID and GID 1000.
 
 Native gates used Rust 1.100.0, `taskset -c 0-7`, and `NCPU=8`. Their single 20M runs took 7.40 s for the default and 4.26 s for the redesign. Docker gates used the scorer flags with CPUs 0–7 and the requested 24 GiB limit on a Docker Desktop VM with 15.62 GiB available. Hyperfine 2.0.0 measured Docker invocation through return, with one warmup and five measurements per image. Its prepare step emptied the output and scratch directories between runs. The cold rebuild reused the pinned base image and downloaded and compiled the locked dependencies afresh.
+## Round 3
+
+### R3-PROFILE · 20M parse self time
+
+The redesign control was `224d9d8`. The profiling build used Rust 1.90.0, the release optimization settings, debug information and frame pointers. Linux perf 7.0.14 recorded DWARF call graphs (4 KiB, 999 Hz, `cpu-clock:u`), pinned to CPUs 0–7 with eight workers. WSL reported hardware cycles unsupported. The unchanged release profile was used for timing comparisons.
+
+The three monotonic-clock windows from end-of-setup to end-of-link-parse, end-of-link-build to end-of-event-parse, and end-of-event-dedup to end-of-click-parse contain 4,767 user-mode samples. The recording lost zero samples. The profile run spent 0.846 s wall and 6.213 process CPU-s in parse, including kernel time. Percentages below divide each instruction's sample period by the total sampled period in those windows. Each instruction is assigned to its innermost DWARF function. This resolves scanner and record code that the non-inlined `perf report --no-children` displays under Rayon worker closures.
+
+| Rank | Function at sampled instruction | Samples | Parse self |
+|---:|---|---:|---:|
+| 1 | `core::ptr::write` | 1,340 | 28.11% |
+| 2 | `redesign::key::Key::new` | 445 | 9.34% |
+| 3 | `time::calendar_ms` | 387 | 8.12% |
+| 4 | `__memcpy_avx_unaligned_erms` | 349 | 7.32% |
+| 5 | `__memcmp_avx2_movbe` | 205 | 4.30% |
+| 6 | `time::digits` | 186 | 3.90% |
+| 7 | `redesign::scan::split` field closure | 133 | 2.79% |
+| 8 | `redesign::scan::split` | 125 | 2.62% |
+| 9 | `time::bounded_uint` | 111 | 2.33% |
+| 10 | `alloc::vec::Vec::push_mut` | 105 | 2.20% |
+| 11 | `redesign::records::parse_events` chunk closure | 100 | 2.10% |
+| 12 | `hashbrown::raw::RawTable::find` closure | 96 | 2.01% |
+| 13 | `_mm256_movemask_epi8` | 88 | 1.85% |
+| 14 | `u128::trailing_zeros` | 81 | 1.70% |
+| 15 | `u8::wrapping_sub` | 74 | 1.55% |
+
+The control already partitions before user interning and ID dedup. During event and click parsing, it scatters into 1,024 per-worker ID buffers and consults the catalogs. The sampled store cost motivates testing sequential output. The software clock does not measure cache misses.
