@@ -10,6 +10,8 @@ use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
 use std::io;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use shopping_sessions::output::CampaignDay;
 use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window};
@@ -309,14 +311,24 @@ pub fn aggregate(
     let can_pack = window.end - window.start <= i64::from(u32::MAX) + 1
         && products.categories.len() <= (1 << (32 - PRICE_BITS));
     let parallelism = rayon::current_num_threads().min(USERS);
-    let size = USERS.div_ceil(parallelism);
-    let parts: Vec<_> = events
-        .into_par_iter()
+    // Workers claim the largest remaining shard first to balance the finish.
+    let mut order: Vec<_> = (0..events.len()).collect();
+    order
+        .sort_by_key(|&shard| std::cmp::Reverse(events[shard].iter().map(Vec::len).sum::<usize>()));
+    let shards: Vec<_> = events
+        .into_iter()
         .zip(clicks)
-        .enumerate()
-        .chunks(size)
-        .enumerate()
-        .map(|(part, parts)| -> Result<_> {
+        .map(|shard| Mutex::new(Some(shard)))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let parts: Vec<_> = (0..parallelism)
+        .into_par_iter()
+        .map(|part| -> Result<_> {
+            let parts = std::iter::from_fn(|| {
+                let shard = *order.get(next.fetch_add(1, Ordering::Relaxed))?;
+                let taken = shards[shard].lock().unwrap().take();
+                Some((shard, taken.unwrap()))
+            });
             let mut daily = UserColumns::default();
             let mut user_day = UserDay::default();
             let mut sort_scratch = Vec::new();
