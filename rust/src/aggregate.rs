@@ -44,17 +44,14 @@ impl CampaignTotals for CampaignDays {
     }
 }
 
-#[derive(Default)]
-struct ActiveCampaign {
-    count: usize,
-    position: usize,
-}
+// Timestamps are validated against the manifest's calendar window before
+// attribution. This sentinel is outside the representable calendar range.
+const INACTIVE: i64 = i64::MIN;
 
 pub struct Attribution<'a> {
     chunks: &'a [Mmap],
-    campaigns: Vec<ActiveCampaign>,
+    last_by_campaign: Vec<i64>,
     active: Vec<u32>,
-    left: usize,
     right: usize,
     latest: Option<Click>,
 }
@@ -63,11 +60,8 @@ impl<'a> Attribution<'a> {
     pub fn new(chunks: &'a [Mmap], campaign_count: usize) -> Self {
         Self {
             chunks,
-            campaigns: (0..campaign_count)
-                .map(|_| ActiveCampaign::default())
-                .collect(),
+            last_by_campaign: vec![INACTIVE; campaign_count],
             active: Vec::new(),
-            left: 0,
             right: 0,
             latest: None,
         }
@@ -75,46 +69,10 @@ impl<'a> Attribution<'a> {
 
     fn reset(&mut self) {
         for campaign in self.active.drain(..) {
-            self.campaigns[campaign as usize].count = 0;
+            self.last_by_campaign[campaign as usize] = INACTIVE;
         }
-        self.left = 0;
         self.right = 0;
         self.latest = None;
-    }
-
-    fn advance(&mut self, start: i64, clicks: &[impl Borrow<Click>]) {
-        while let Some(row) = clicks.get(self.right) {
-            let click = *row.borrow();
-            if click.time > start {
-                break;
-            }
-            if self.latest.is_none_or(|latest| {
-                click.time > latest.time
-                    || click.location.id(self.chunks) < latest.location.id(self.chunks)
-            }) {
-                self.latest = Some(click);
-            }
-            let slot = &mut self.campaigns[click.campaign as usize];
-            if slot.count == 0 {
-                slot.position = self.active.len();
-                self.active.push(click.campaign);
-            }
-            slot.count += 1;
-            self.right += 1;
-        }
-        while self.left < self.right && clicks[self.left].borrow().time < start - LOOKBACK_MS {
-            let campaign = clicks[self.left].borrow().campaign;
-            let slot = &mut self.campaigns[campaign as usize];
-            slot.count -= 1;
-            if slot.count == 0 {
-                let position = slot.position;
-                self.active.swap_remove(position);
-                if let Some(&swapped) = self.active.get(position) {
-                    self.campaigns[swapped as usize].position = position;
-                }
-            }
-            self.left += 1;
-        }
     }
 
     fn credit(
@@ -125,19 +83,61 @@ impl<'a> Attribution<'a> {
         revenue: i64,
         campaign_days: &mut impl CampaignTotals,
     ) {
-        self.advance(start, clicks);
-        let campaign = if self.active.is_empty() {
-            0 // Organic is reserved at index 0.
-        } else {
-            self.latest.unwrap().campaign
-        };
+        let cutoff = start - LOOKBACK_MS;
+        let first = self.right;
+        while let Some(row) = clicks.get(self.right) {
+            let click = row.borrow();
+            if click.time > start {
+                break;
+            }
+            if click.time >= cutoff {
+                let last = &mut self.last_by_campaign[click.campaign as usize];
+                if *last == INACTIVE {
+                    self.active.push(click.campaign);
+                }
+                *last = click.time;
+            }
+            self.right += 1;
+        }
+        // Equal-time clicks enter the window together. Only ties at the
+        // latest timestamp can affect the winning campaign.
+        if self.right != first {
+            let mut winner = *clicks[self.right - 1].borrow();
+            if winner.time >= cutoff {
+                for row in clicks[first..self.right - 1].iter().rev() {
+                    let click = row.borrow();
+                    if click.time != winner.time {
+                        break;
+                    }
+                    if click.location.id(self.chunks) < winner.location.id(self.chunks) {
+                        winner = *click;
+                    }
+                }
+                self.latest = Some(winner);
+            } else {
+                self.latest = None;
+            }
+        }
+        let campaign = self
+            .latest
+            .filter(|last| last.time >= cutoff)
+            .map_or(0, |last| last.campaign);
         let totals = campaign_days.daily(campaign, day);
         totals.sessions += 1;
         totals.purchasing += i64::from(revenue > 0);
         totals.revenue += revenue;
-        for &campaign in &self.active {
-            campaign_days.daily(campaign, day).assists += 1;
-        }
+        // A campaign's most recent eligible click determines whether any
+        // click from it assists. Expire entries while counting that session.
+        self.active.retain(|&id| {
+            let last = &mut self.last_by_campaign[id as usize];
+            if *last >= cutoff {
+                campaign_days.daily(id, day).assists += 1;
+                true
+            } else {
+                *last = INACTIVE;
+                false
+            }
+        });
     }
 }
 
