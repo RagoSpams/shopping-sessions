@@ -400,3 +400,15 @@ Make an event-ID-only CSV pass. Radix-partition eight-byte projection/offset tic
 | prepass | 0.721 / 3.763 | 0.081 / 0.324 | 0.562 / 2.691 | 0.535 / 2.897 | 0.573 / 3.284 | 0.140 / 0.572 | 0.001 / 0.002 | 2.891 / 13.650 | 2.96 |
 
 **Reverted.** The second input pass and mapped byte checks cost more in dedup than the narrower full parse saved.
+
+### R3-SCALE follow-up · accepted ticket pipeline
+
+A diagnostic build of `572e871` used the same passive residency and stage counters as the calibration diagnostic. The 60M repeat matched both prior validated tables. These single-run measurements used the shared timing lock. Other host work still affected CPU speed.
+
+| Input/run | CSV pages resident before run | Wall s | User + system CPU-s | Peak RSS GiB | Major faults | Parse CPU-s | Dedup CPU-s | Resolve CPU-s | Sessions CPU-s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20M | 100.00% | 3.11 | 12.77 + 2.63 | 3.10 | 87 | 5.83 | 1.43 | 3.32 | 3.69 |
+| 60M first | 25.09% | 13.04 | 45.69 + 17.95 | 9.14 | 47,678 | 30.40 | 6.88 | 12.58 | 10.91 |
+| 60M repeat | 97.68% | 7.13 | 39.07 + 7.69 | 9.37 | 8,276 | 16.12 | 5.81 | 11.55 | 10.04 |
+
+The repeat reduced dedup from calibration's 14.42 to 5.81 CPU-s, while resolve rose from 5.51 to 11.55 CPU-s with the larger 32-way alias shards. Initial residency and host load differed between runs. A separate 20M resolve profile assigned 45.4% of user-mode samples to the Swiss table's find-or-insert-slot closure and 13.1% to the root fetch.
