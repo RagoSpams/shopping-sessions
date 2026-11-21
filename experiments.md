@@ -309,3 +309,16 @@ Estimate initial per-worker capacities using complete newline-terminated rows sa
 | reserve | 0.531 / 3.653 | 0.049 / 0.320 | 0.132 / 0.889 | 0.244 / 1.793 | 0.389 / 2.672 | 0.074 / 0.470 | 0.001 / 0.002 | 1.509 / 9.828 | 3.05 |
 
 **Kept.** Parse CPU and median wall fell with fewer reallocations. Peak RSS fell by 0.33 GiB.
+
+### R3-OWNER
+
+Route each parsed row to its final person owner using the immutable union directory and a 2,048-entry per-chunk exact alias cache. Intern unresolved singleton names at the receiving owner. Each accepted record then converts to a person row in its existing partition.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.904 / 5.030 | 0.075 / 0.306 | 0.210 / 1.130 | 0.417 / 2.484 | 0.561 / 3.264 | 0.113 / 0.537 | 0.002 / 0.003 | 2.386 / 13.099 | 3.06 |
+| owner | 2.218 / 14.710 | 0.075 / 0.318 | 0.246 / 1.203 | 0.099 / 0.570 | 0.661 / 3.797 | 0.120 / 0.566 | 0.001 / 0.002 | 3.584 / 21.603 | 3.03 |
+
+**Reverted.** Resolve became cheaper, but global alias probes in the parse loop cost far more. This directly tests the cost of introducing per-row random interning lookups into the parser.
