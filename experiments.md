@@ -617,3 +617,11 @@ Reserve each partition's forward lists for three eighths of its rows spread over
 | resolve2 | 0.420 / 3.221 | 0.049 / 0.306 | 0.082 / 0.581 | 0.101 / 0.765 | 0.180 / 1.423 | 0.001 / 0.001 | 0.004 / 0.006 | 0.844 / 6.284 | 2.86 |
 
 **Kept.** Resolve CPU fell from 0.800 to 0.765 s and end to end from 0.924 to 0.844 s in five pairs on a busy host (screen: resolve 0.103 to 0.091 s, end to end 0.860 to 0.828 s).
+
+### R3-OVERLAP
+
+Run event deduplication and click parsing concurrently with `rayon::join` instead of back to back.
+
+Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `648cac5`: the joined phase took 0.174 s against 0.094 s of dedup plus about 0.08 s of click parsing in sequence; end to end 0.890 vs 1.018 s and 6.50 vs 7.47 CPU-s.
+
+**Reverted.** The two parallel phases contended for the same eight workers rather than filling each other's idle tails.
