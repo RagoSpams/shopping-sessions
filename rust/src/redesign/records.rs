@@ -1,4 +1,4 @@
-use crate::buckets::{self, IDS, Partitions, USERS, bucket};
+use crate::buckets::{self, IDS, USERS, bucket};
 use crate::calendar::Calendar;
 use crate::key::PackedKey;
 use crate::scan::rows;
@@ -15,55 +15,66 @@ use std::ops::Range;
 // A structurally valid row keeps its place in the index even with invalid values.
 const INVALID: i64 = i64::MIN;
 
+/// A row sits in the partition of its user's hash. It has the size and
+/// alignment of the person row it becomes, so resolution rewrites each
+/// partition run in place.
+#[derive(Clone, Copy)]
 pub struct Record<T> {
-    id: PackedKey,
     pub user: PackedKey,
     pub payload: T,
 }
 
+/// Deduplication reads the record ID and ordering key from these side columns,
+/// stored beside the tickets of the same ID partition.
 #[derive(Clone, Copy)]
-pub struct PendingEvent {
+pub struct EventSide {
+    id: PackedKey,
     ingest: i64,
-    event: Event,
 }
 
 pub trait Candidate: Send + Sync + Copy {
+    type Side: Send + Sync + Copy;
+    fn id(side: &Self::Side) -> PackedKey;
+    fn earlier(side: &Self::Side, other: &Self::Side) -> bool;
     fn discard(&mut self);
-    type Valid: Send;
-    fn earlier(&self, other: &Self) -> bool;
-    fn validate(self) -> Option<Self::Valid>;
+    fn valid(&self) -> bool;
 }
 
-impl Candidate for PendingEvent {
-    type Valid = Event;
+impl Candidate for Event {
+    type Side = EventSide;
+    fn id(side: &EventSide) -> PackedKey {
+        side.id
+    }
+    fn earlier(side: &EventSide, other: &EventSide) -> bool {
+        side.ingest < other.ingest
+    }
     fn discard(&mut self) {
-        self.event.time = INVALID;
+        self.time = INVALID;
     }
-    fn earlier(&self, other: &Self) -> bool {
-        self.ingest < other.ingest
-    }
-    fn validate(self) -> Option<Event> {
-        (self.event.time != INVALID && self.ingest - self.event.time <= DAY_MS)
-            .then_some(self.event)
+    fn valid(&self) -> bool {
+        self.time != INVALID
     }
 }
 
 impl Candidate for Click {
-    type Valid = Click;
+    type Side = PackedKey;
+    fn id(side: &PackedKey) -> PackedKey {
+        *side
+    }
+    fn earlier(_: &PackedKey, _: &PackedKey) -> bool {
+        false
+    }
     fn discard(&mut self) {
         self.time = INVALID;
     }
-    fn earlier(&self, _: &Self) -> bool {
-        false
-    }
-    fn validate(self) -> Option<Self> {
-        (self.time != INVALID).then_some(self)
+    fn valid(&self) -> bool {
+        self.time != INVALID
     }
 }
 
 // Estimate allocation sizes from complete sampled rows. All buffers still
 // grow normally when worker scheduling, malformed rows or skew change demand.
-fn rows_per_worker<T>(chunks: &[Mmap], range: Range<usize>) -> usize {
+fn rows_per_worker<T: Candidate>(chunks: &[Mmap], range: Range<usize>) -> usize {
     let workers = range.len().min(rayon::current_num_threads()).max(1);
     let mut estimated = 0u128;
     let mut bytes = 0u128;
@@ -77,7 +88,8 @@ fn rows_per_worker<T>(chunks: &[Mmap], range: Range<usize>) -> usize {
         }
     }
     // Bound speculative capacity even if the sample consists of empty lines.
-    let limit = bytes * 2 / (size_of::<Record<T>>() + size_of::<Ticket>()) as u128;
+    let row = size_of::<Record<T>>() + size_of::<Ticket<T::Side>>();
+    let limit = bytes * 2 / row as u128;
     ((estimated + estimated / 8).min(limit) / workers as u128) as usize
 }
 
@@ -87,8 +99,8 @@ pub fn parse_events(
     hash: &RandomState,
     window: Window,
     products: &Products,
-) -> Vec<Batch<PendingEvent>> {
-    let expected = rows_per_worker::<PendingEvent>(chunks, range.clone());
+) -> Vec<Batch<Event>> {
+    let expected = rows_per_worker::<Event>(chunks, range.clone());
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
@@ -119,28 +131,30 @@ pub fn parse_events(
                     }
                     _ => (0, 0, false),
                 };
-                let time = if valid_kind && !user.is_empty() && !product.is_empty() {
+                let mut time = if valid_kind && !user.is_empty() && !product.is_empty() {
                     calendar.timestamp(window, ts).unwrap_or(INVALID)
                 } else {
                     INVALID
                 };
+                // A late copy can still win deduplication, so lateness is part
+                // of this row's own validity.
+                if time != INVALID && ingest - time > DAY_MS {
+                    time = INVALID;
+                }
                 let user = PackedKey::new(user, chunk, i);
                 append(
                     out,
                     id.hash(hash, chunks),
-                    user.hash(hash, chunks),
+                    bucket(user.hash(hash, chunks), USERS),
                     Record {
-                        id,
                         user,
-                        payload: PendingEvent {
-                            ingest,
-                            event: Event {
-                                time,
-                                price,
-                                category,
-                            },
+                        payload: Event {
+                            time,
+                            price,
+                            category,
                         },
                     },
+                    EventSide { id, ingest },
                 );
             }
         },
@@ -178,9 +192,8 @@ pub fn parse_clicks(
                 append(
                     out,
                     id.hash(hash, chunks),
-                    user.hash(hash, chunks),
+                    bucket(user.hash(hash, chunks), USERS),
                     Record {
-                        id,
                         user,
                         payload: Click {
                             time,
@@ -188,6 +201,7 @@ pub fn parse_clicks(
                             location: Location::new(i, offset),
                         },
                     },
+                    id,
                 );
             }
         },
@@ -195,19 +209,21 @@ pub fn parse_clicks(
     batches.into_iter().flatten().collect()
 }
 
-// Only these eight bytes per row move through the ID partitions. Payloads
-// already belong to the user partition that will consume them.
-struct Ticket {
+// A ticket carries the exact record ID and ordering key into its ID partition.
+// Payloads already belong to the partition that will consume them.
+#[derive(Clone, Copy)]
+struct Ticket<S> {
     projection: u32,
     slot: u32,
+    side: S,
 }
 
-pub struct Batch<T> {
-    rows: Vec<Vec<Record<T>>>,
-    tickets: Vec<Vec<Ticket>>,
+pub struct Batch<T: Candidate> {
+    pub rows: Vec<Vec<Record<T>>>,
+    tickets: Vec<Vec<Ticket<T::Side>>>,
 }
 
-impl<T> Batch<T> {
+impl<T: Candidate> Batch<T> {
     fn new(expected: usize) -> Self {
         Self {
             rows: (0..USERS)
@@ -218,10 +234,6 @@ impl<T> Batch<T> {
                 .collect(),
         }
     }
-
-    fn get(&self, slot: u32) -> &Record<T> {
-        &self.rows[bucket_of_slot(slot)][index_of_slot(slot)]
-    }
 }
 
 fn bucket_of_slot(slot: u32) -> usize {
@@ -231,33 +243,40 @@ fn index_of_slot(slot: u32) -> usize {
     slot as usize / USERS
 }
 
-fn append<T>(batches: &mut Vec<Batch<T>>, id_hash: u64, user_hash: u64, row: Record<T>) {
-    let user = bucket(user_hash, USERS);
+#[inline]
+fn append<T: Candidate>(
+    batches: &mut Vec<Batch<T>>,
+    id_hash: u64,
+    owner: usize,
+    row: Record<T>,
+    side: T::Side,
+) {
     let max_index = u32::MAX as usize / USERS;
-    if batches.last().unwrap().rows[user].len() > max_index {
+    if batches.last().unwrap().rows[owner].len() > max_index {
         batches.push(Batch::new(0));
     }
     let batch = batches.last_mut().unwrap();
-    let slot = (batch.rows[user].len() * USERS + user) as u32;
-    batch.rows[user].push(row);
+    let slot = (batch.rows[owner].len() * USERS + owner) as u32;
+    batch.rows[owner].push(row);
     batch.tickets[bucket(id_hash, IDS)].push(Ticket {
         projection: id_hash as u32,
         slot,
+        side,
     });
 }
 
 #[derive(Clone, Copy)]
-struct Place {
+struct Place<S> {
     batch: usize,
     slot: u32,
     projection: u32,
+    side: S,
 }
 
 fn losers<T: Candidate>(
-    runs: Vec<(usize, Vec<Ticket>)>,
-    batches: &[Batch<T>],
+    runs: Vec<(usize, Vec<Ticket<T::Side>>)>,
     chunks: &[Mmap],
-) -> Vec<Place> {
+) -> Vec<(usize, u32)> {
     let count: usize = runs.iter().map(|(_, run)| run.len()).sum();
     let words = count.div_ceil(8).next_power_of_two();
     let mut seen = vec![0u64; words];
@@ -273,11 +292,17 @@ fn losers<T: Candidate>(
             hits += usize::from(old != 0);
         }
     }
-    let mut table: HashTable<Place> = HashTable::with_capacity((2 * hits).min(count));
+    drop(seen);
+    let mut table: HashTable<Place<T::Side>> = HashTable::with_capacity((2 * hits).min(count));
     let mut lost = Vec::new();
     let hash = |h: u32| u64::from(h).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     for (batch, run) in runs {
-        for Ticket { projection, slot } in run {
+        for Ticket {
+            projection,
+            slot,
+            side,
+        } in run
+        {
             let (word, mask) = bit(projection);
             if repeated[word] & mask == 0 {
                 continue;
@@ -286,16 +311,12 @@ fn losers<T: Candidate>(
                 batch,
                 slot,
                 projection,
+                side,
             };
-            let row = || batches[batch].get(slot);
+            let id = T::id(&side);
             match table.entry(
                 hash(projection),
-                |stored| {
-                    stored.projection == projection
-                        && row()
-                            .id
-                            .matches(batches[stored.batch].get(stored.slot).id, chunks)
-                },
+                |stored| stored.projection == projection && T::id(&stored.side).matches(id, chunks),
                 |stored| hash(stored.projection),
             ) {
                 Entry::Vacant(entry) => {
@@ -303,14 +324,12 @@ fn losers<T: Candidate>(
                 }
                 Entry::Occupied(mut entry) => {
                     let stored = entry.get_mut();
-                    let earlier = row()
-                        .payload
-                        .earlier(&batches[stored.batch].get(stored.slot).payload);
-                    lost.push(if earlier {
+                    let loser = if T::earlier(&side, &stored.side) {
                         std::mem::replace(stored, place)
                     } else {
                         place
-                    });
+                    };
+                    lost.push((loser.batch, loser.slot));
                 }
             }
         }
@@ -318,7 +337,8 @@ fn losers<T: Candidate>(
     lost
 }
 
-pub fn dedup<T: Candidate>(mut batches: Vec<Batch<T>>, chunks: &[Mmap]) -> Partitions<Record<T>> {
+/// Marks every copy except the first by ingest time (any copy for clicks).
+pub fn dedup<T: Candidate>(mut batches: Vec<Batch<T>>, chunks: &[Mmap]) -> Vec<Batch<T>> {
     let mut partitions = buckets::empty(IDS);
     for (i, batch) in batches.iter_mut().enumerate() {
         for (shard, tickets) in partitions
@@ -332,23 +352,21 @@ pub fn dedup<T: Candidate>(mut batches: Vec<Batch<T>>, chunks: &[Mmap]) -> Parti
     }
     let lost: Vec<_> = partitions
         .into_par_iter()
-        .map(|runs| losers(runs, &batches, chunks))
+        .map(|runs| losers::<T>(runs, chunks))
         .collect();
     let mut discard = buckets::empty(batches.len());
-    for place in lost.into_iter().flatten() {
-        discard[place.batch].push(place.slot);
+    for (batch, slot) in lost.into_iter().flatten() {
+        discard[batch].push(slot);
     }
-    let groups = batches
-        .into_par_iter()
+    batches
+        .par_iter_mut()
         .zip(discard)
-        .map(|(mut batch, slots)| {
+        .for_each(|(batch, slots)| {
             for slot in slots {
                 batch.rows[bucket_of_slot(slot)][index_of_slot(slot)]
                     .payload
                     .discard();
             }
-            batch.rows
-        })
-        .collect();
-    buckets::transpose(groups, USERS)
+        });
+    batches
 }

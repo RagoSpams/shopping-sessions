@@ -451,3 +451,16 @@ Write every parsed row to one contiguous per-worker vector. Replace the user key
 | handles | 0.772 / 5.484 | 0.044 / 0.284 | 0.135 / 0.943 | 0.397 / 2.450 | 0.370 / 2.586 | 0.080 / 0.513 | 0.001 / 0.003 | 1.885 / 12.347 | 3.57 |
 
 **Reverted.** The recent-user cache missed on 21.0M of 26.2M rows, so nearly every row still produced an alias. Parse rose from 0.598 to 0.772 s and resolve from 0.186 to 0.397 s.
+
+### R3-INPLACE
+
+Carry the event ID and ingest time (or the click ID) in the ID-partition ticket, apply the late check during parse, and shrink each row to its user key and final payload. A row then has the size and alignment of its person row. Resolution rewrites every user-partition run in place and scatters only the rows of persons owned by another partition, through per-owner lists built in parallel. Exact deduplication reads the ticket side data sequentially.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user128 | 0.581 / 4.103 | 0.043 / 0.285 | 0.124 / 0.888 | 0.197 / 1.399 | 0.384 / 2.713 | 0.095 / 0.551 | 0.001 / 0.002 | 1.560 / 9.949 | 3.14 |
+| inplace | 0.537 / 3.845 | 0.046 / 0.279 | 0.098 / 0.697 | 0.110 / 0.850 | 0.328 / 2.359 | 0.077 / 0.482 | 0.001 / 0.002 | 1.300 / 8.570 | 2.99 |
+
+**Kept.** Resolve fell from 0.197 to 0.110 s and dedup from 0.124 to 0.098 s, with lower parse and aggregate medians and 0.15 GiB lower peak RSS. A routed variant that sent rows to their person's owner during parse through a 4-byte hint table needed no forwarding but cost 0.15–0.3 s more parse time, even with huge pages and a prefetch ring; without hints, 35% of rows move between partitions.

@@ -1,6 +1,6 @@
-use crate::buckets::{self, Partitions, Runs, USERS, bucket};
+use crate::buckets::{self, Partitions, USERS, bucket};
 use crate::key::{Key, PackedKey};
-use crate::records::{Candidate, PendingEvent, Record};
+use crate::records::{Batch, Candidate, Record};
 use crate::scan::rows;
 use ahash::RandomState;
 use memmap2::Mmap;
@@ -131,46 +131,6 @@ impl Directory {
         };
         id
     }
-
-    fn route<T: Candidate>(
-        &mut self,
-        shard: usize,
-        rows: Runs<Record<T>>,
-        state: &RandomState,
-        chunks: &[Mmap],
-    ) -> Vec<Vec<PersonRow<T::Valid>>> {
-        let mut output = buckets::empty(USERS);
-        for run in rows {
-            for block in run.chunks(32) {
-                let mut hashes = [0; 32];
-                for (hash, row) in hashes.iter_mut().zip(block) {
-                    *hash = row.user.hash(state, chunks);
-                    #[cfg(target_arch = "x86_64")]
-                    if !self.slots.is_empty() {
-                        let i = *hash as usize & (self.slots.len() - 1);
-                        // The slot belongs to the current table. A later grow
-                        // can invalidate this hint but never the lookup below.
-                        unsafe {
-                            std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
-                                self.slots.as_ptr().add(i).cast(),
-                            );
-                        }
-                    }
-                }
-                for (&hash, row) in hashes.iter().zip(block) {
-                    let Some(data) = row.payload.validate() else {
-                        continue;
-                    };
-                    let root = self.intern(shard, row.user, hash, chunks);
-                    output[owner(root)].push(PersonRow {
-                        person: local(root) as u32,
-                        data,
-                    });
-                }
-            }
-        }
-        output
-    }
 }
 
 fn parent(parents: &[Vec<AtomicU32>], id: u32) -> &AtomicU32 {
@@ -264,35 +224,145 @@ pub struct PeopleRows {
     pub clicks: Partitions<PersonRow<Click>>,
 }
 
+impl Directory {
+    /// Rewrite one partition run into person rows within its own allocation.
+    /// Rows whose person another partition owns move to that owner's list.
+    fn convert<T: Candidate>(
+        &mut self,
+        shard: usize,
+        run: Vec<Record<T>>,
+        forwards: &mut [Vec<PersonRow<T>>],
+        state: &RandomState,
+        chunks: &[Mmap],
+    ) -> Vec<PersonRow<T>> {
+        const {
+            assert!(size_of::<Record<T>>() == size_of::<PersonRow<T>>());
+            assert!(align_of::<Record<T>>() == align_of::<PersonRow<T>>());
+        }
+        let mut run = std::mem::ManuallyDrop::new(run);
+        let (records, len, capacity) = (run.as_mut_ptr(), run.len(), run.capacity());
+        let people = records.cast::<PersonRow<T>>();
+        let mut kept = 0;
+        let mut start = 0;
+        while start < len {
+            let end = (start + 32).min(len);
+            let mut hashes = [0u64; 32];
+            for (i, hash) in (start..end).zip(&mut hashes) {
+                // Every index below len holds an initialized record.
+                *hash = unsafe { &*records.add(i) }.user.hash(state, chunks);
+                #[cfg(target_arch = "x86_64")]
+                if !self.slots.is_empty() {
+                    let slot = *hash as usize & (self.slots.len() - 1);
+                    // The slot belongs to the current table. A later grow can
+                    // invalidate this hint but never the lookup below.
+                    unsafe {
+                        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(
+                            self.slots.as_ptr().add(slot).cast(),
+                        );
+                    }
+                }
+            }
+            for (i, &hash) in (start..end).zip(&hashes) {
+                // Record i is read before output slot kept <= i is written.
+                // Both types are plain data of equal size, so the write never
+                // reaches an unread record and the allocation keeps its layout.
+                let record = unsafe { records.add(i).read() };
+                if !record.payload.valid() {
+                    continue;
+                }
+                let root = self.intern(shard, record.user, hash, chunks);
+                let row = PersonRow {
+                    person: local(root) as u32,
+                    data: record.payload,
+                };
+                if owner(root) == shard {
+                    unsafe { people.add(kept).write(row) };
+                    kept += 1;
+                } else {
+                    forwards[owner(root)].push(row);
+                }
+            }
+            start = end;
+        }
+        unsafe { Vec::from_raw_parts(people, kept, capacity) }
+    }
+
+    fn convert_runs<T: Candidate>(
+        &mut self,
+        shard: usize,
+        runs: Vec<Vec<Record<T>>>,
+        state: &RandomState,
+        chunks: &[Mmap],
+    ) -> (Vec<Vec<PersonRow<T>>>, Vec<Vec<PersonRow<T>>>) {
+        let mut forwards = buckets::empty(USERS);
+        let local = runs
+            .into_iter()
+            .filter(|run| !run.is_empty())
+            .map(|run| self.convert(shard, run, &mut forwards, state, chunks))
+            .collect();
+        (local, forwards)
+    }
+}
+
+fn take_runs<T: Candidate>(batches: &mut [Batch<T>]) -> Partitions<Record<T>> {
+    let mut parts = buckets::empty(USERS);
+    for batch in batches {
+        for (dst, run) in parts.iter_mut().zip(std::mem::take(&mut batch.rows)) {
+            dst.push(run);
+        }
+    }
+    parts
+}
+
+// Append the rows each partition forwarded to the partitions that own them.
+fn deliver<T>(parts: &mut Partitions<PersonRow<T>>, forwards: Vec<Vec<Vec<PersonRow<T>>>>) {
+    for runs in forwards {
+        for (dst, run) in parts.iter_mut().zip(runs) {
+            if !run.is_empty() {
+                dst.push(run);
+            }
+        }
+    }
+}
+
 pub fn resolve(
     dirs: Vec<Directory>,
-    events: Partitions<Record<PendingEvent>>,
-    clicks: Partitions<Record<Click>>,
+    mut events: Vec<Batch<Event>>,
+    mut clicks: Vec<Batch<Click>>,
     state: &RandomState,
     chunks: &[Mmap],
 ) -> PeopleRows {
+    let event_runs = take_runs(&mut events);
+    let click_runs = take_runs(&mut clicks);
+    drop((events, clicks));
     let resolved: Vec<_> = dirs
         .into_par_iter()
-        .zip(events)
-        .zip(clicks)
+        .zip(event_runs)
+        .zip(click_runs)
         .enumerate()
         .map(|(shard, ((mut dir, events), clicks))| {
-            let events = dir.route(shard, events, state, chunks);
-            let clicks = dir.route(shard, clicks, state, chunks);
-            (dir.names, events, clicks)
+            let (events, event_forwards) = dir.convert_runs(shard, events, state, chunks);
+            let (clicks, click_forwards) = dir.convert_runs(shard, clicks, state, chunks);
+            (dir.names, events, clicks, event_forwards, click_forwards)
         })
         .collect();
     let mut names = Vec::with_capacity(USERS);
-    let mut event_batches = Vec::with_capacity(USERS);
-    let mut click_batches = Vec::with_capacity(USERS);
-    for (partition, events, clicks) in resolved {
+    let mut event_parts = Vec::with_capacity(USERS);
+    let mut click_parts = Vec::with_capacity(USERS);
+    let mut event_forwards = Vec::with_capacity(USERS);
+    let mut click_forwards = Vec::with_capacity(USERS);
+    for (partition, events, clicks, ef, cf) in resolved {
         names.push(partition);
-        event_batches.push(events);
-        click_batches.push(clicks);
+        event_parts.push(events);
+        click_parts.push(clicks);
+        event_forwards.push(ef);
+        click_forwards.push(cf);
     }
+    deliver(&mut event_parts, event_forwards);
+    deliver(&mut click_parts, click_forwards);
     PeopleRows {
         names,
-        events: buckets::transpose(event_batches, USERS),
-        clicks: buckets::transpose(click_batches, USERS),
+        events: event_parts,
+        clicks: click_parts,
     }
 }
