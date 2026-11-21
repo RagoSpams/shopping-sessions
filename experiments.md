@@ -679,3 +679,11 @@ Reserve each link worker's endpoint lists from the link input size, and size eve
 Screen against `af53ca3`: 36/36 fixtures, dev and s3-3m MATCH. Two three-pair series: links 0.047 vs 0.047 s and 0.045 vs 0.049 s; resolve 0.095 vs 0.087 s and 0.091 vs 0.092 s; end to end 0.788 vs 0.783 s and 0.781 vs 0.810 s.
 
 **Reverted.** Link CPU fell 8% in the first series, but neither series moved the links wall time and the second reversed the end-to-end result.
+
+### R3-POOL
+
+Run the release build with 12 or 16 pool threads instead of 8 while still pinned to CPUs 0–7, to let extra threads run while others wait on page provisioning.
+
+Three interleaved single runs per size against `af53ca3` code: 8 threads 0.89 (first run), 0.76 and 0.77 s; 12 threads 0.81, 0.79 and 0.79 s; 16 threads 0.82, 0.78 and 0.82 s.
+
+**Not adopted.** Oversubscription did not help, and the scorer sets `NCPU` anyway.
