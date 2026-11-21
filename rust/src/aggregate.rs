@@ -6,16 +6,12 @@ use memmap2::Mmap;
 use parquet::errors::Result;
 use std::borrow::Borrow;
 
-// Four-byte packing removes padding from the routed rows. Fields are copied,
-// never borrowed, so unaligned eight-byte fields are read by value.
-#[repr(C, packed(4))]
 pub struct PersonRow<T> {
     pub person: u32,
     pub data: T,
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed(4))]
 pub struct Event {
     pub time: i64,
     pub price: u32,
@@ -23,7 +19,6 @@ pub struct Event {
 }
 
 #[derive(Clone, Copy)]
-#[repr(C, packed(4))]
 pub struct Click {
     pub time: i64,
     pub campaign: u32,
