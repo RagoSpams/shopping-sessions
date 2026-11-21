@@ -126,6 +126,13 @@ mod tests {
     use super::rows;
     use shopping_sessions::csv::{csv, lines};
 
+    fn check<const N: usize>(chunk: &[u8]) {
+        let expected: Vec<_> = lines(chunk)
+            .filter_map(|(o, line)| csv::<N>(line).map(|f| (o, f)))
+            .collect();
+        assert_eq!(rows::<N>(chunk).collect::<Vec<_>>(), expected);
+    }
+
     #[test]
     fn mapped_scanner_matches_reference_at_boundaries() {
         let fields = [
@@ -156,9 +163,62 @@ mod tests {
             }
         }
         chunk.extend_from_slice(b"\"last\",,final");
-        let expected: Vec<_> = lines(&chunk)
-            .filter_map(|(o, line)| csv::<3>(line).map(|f| (o, f)))
-            .collect();
-        assert_eq!(rows::<3>(&chunk).collect::<Vec<_>>(), expected);
+        check::<3>(&chunk);
+    }
+
+    #[test]
+    fn sliding_window_matches_reference_on_random_rows() {
+        // A small deterministic generator mixes short and long rows, quotes in
+        // every position, empty lines, CR bytes and wrong field counts.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let alphabet = b"ab,\"\r z\n";
+        for round in 0..200 {
+            let mut chunk = Vec::new();
+            for _ in 0..200 {
+                let fields = 1 + next(9) as usize;
+                for f in 0..fields {
+                    if f > 0 {
+                        chunk.push(b',');
+                    }
+                    let quoted = next(4) == 0;
+                    if quoted {
+                        chunk.push(b'"');
+                    }
+                    let width = match next(10) {
+                        0 => next(200) as usize,
+                        1 => 0,
+                        _ => next(14) as usize,
+                    };
+                    for _ in 0..width {
+                        // Mostly plain bytes, occasionally structural ones.
+                        let byte = if next(25) == 0 {
+                            alphabet[next(alphabet.len() as u64) as usize]
+                        } else {
+                            b'a' + next(26) as u8
+                        };
+                        chunk.push(byte);
+                    }
+                    if quoted && next(8) != 0 {
+                        chunk.push(b'"');
+                    }
+                }
+                if next(30) != 0 {
+                    chunk.push(b'\n');
+                }
+            }
+            if round % 2 == 0 {
+                chunk.extend_from_slice(b"tail,without,newline");
+            }
+            check::<2>(&chunk);
+            check::<3>(&chunk);
+            check::<4>(&chunk);
+            check::<7>(&chunk);
+        }
     }
 }

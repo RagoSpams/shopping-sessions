@@ -563,3 +563,15 @@ Load products and campaigns directly into the packed-word index, with category I
 | catalogs | 0.506 / 3.787 | 0.080 / 0.467 | 0.115 / 0.811 | 0.132 / 1.030 | 0.236 / 1.836 | 0.001 / 0.001 | 0.005 / 0.009 | 1.104 / 8.022 | 2.83 |
 
 **Kept.** The serial product catalog had taken 13.5–20.5 ms before link parsing began. Five pairs measured 1.104 vs 1.279 s and 8.02 vs 8.86 CPU-s on a loaded host; the three-pair screen measured 1.007 vs 1.044 s. All three edge sets still match.
+
+### R3-SCAN
+
+Three scanner variants against `a1bd272`, each screened with 36/36 fixtures, dev and s3-3m MATCH, and three alternating 20M pairs. A new randomized unit test compares the scanner with the reference line and CSV parser on 200 generated chunks per field count (2, 3, 4 and 7 fields), covering quotes in every position, empty lines, CR bytes, wrong field counts and rows longer than the vector window.
+
+| Variant | Parse s (base / new) | End to end s (base / new) |
+|---|---:|---:|
+| Sliding 128-byte window of newline, comma and quote masks built once per 64-byte block | 0.395 / 0.453 | 0.814 / 0.877 |
+| Per-line masks as before, comma positions from two `u64` halves and unchecked field slices | 0.411 / 0.403 | 0.828 / 0.850 |
+| Per-line masks over all four 32-byte blocks without the early newline exit | 0.417 / 0.450 | 0.835 / 0.905 |
+
+**Reverted.** None beat the per-line scanner, which runs at 3.35 GB/s per core against an 11–13 GB/s mask-only floor; carrying window state between rows cost more than recomputing masks per line. The randomized test is kept.
