@@ -86,10 +86,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         window,
     )?;
     timer.end(Stage::Aggregate);
-    tables::write(&output, &users, &daily)?;
+    // The output columns own their strings and numbers. After aggregation
+    // no output writer can refer to the input mappings.
+    let (_, written) = rayon::join(|| drop(chunks), || tables::write(&output, &users, &daily));
+    written?;
     timer.end(Stage::Write);
     timer.print();
-    // All Parquet writers have closed successfully. The OS can reclaim the
-    // read-only mappings and bulk workspaces together at process exit.
+    // All writers have closed. The OS reclaims the remaining workspaces at exit.
     std::process::exit(0);
 }
