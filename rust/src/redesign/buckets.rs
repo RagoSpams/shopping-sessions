@@ -26,8 +26,10 @@ pub fn consume_chunks<B: Send>(
     init: impl Fn() -> B + Sync,
     consume: impl Fn(&mut B, usize) + Sync,
 ) -> Vec<B> {
+    // Whole mebibytes rank the chunks, so the many full-size chunks keep
+    // their file order and arrive from a cold disk in the order they are read.
     let mut order: Vec<usize> = range.collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(chunks[i].len()));
+    order.sort_by_key(|&i| std::cmp::Reverse(chunks[i].len() >> 20));
     let next = AtomicUsize::new(0);
     (0..order.len().min(rayon::current_num_threads()))
         .into_par_iter()

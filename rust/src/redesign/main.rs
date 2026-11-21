@@ -3,6 +3,7 @@ mod calendar;
 mod dims;
 mod key;
 mod links;
+mod prefetch;
 mod records;
 mod scan;
 mod tables;
@@ -32,6 +33,8 @@ static MALLOC_CONF: Option<&std::ffi::c_char> =
 fn main() -> Result<(), Box<dyn Error>> {
     let mut timer = Timings::new();
     let input = path("DATA_DIR", "/data");
+    // Cold inputs dominate start-to-exit time; start reading them at once.
+    prefetch::start(&input);
     let output = path("OUTPUT_DIR", "/output");
     let threads = match std::env::var("NCPU") {
         Ok(n) => n.parse::<NonZeroUsize>()?.get(),

@@ -740,3 +740,13 @@ Before each run, `posix_fadvise(POSIX_FADV_DONTNEED)` dropped every file of s5-2
 The first cold runs of `aaf2481` spent 1.07–1.14 s parsing (warm about 0.38–0.41 s) and 0.21–0.24 s in the link stage (warm about 0.043 s). Reading cold input dominates. A single cold `cat` of the s3-3m events read about 630 MB/s on this WSL2 disk, so local cold is slower than the board's 1.18 s, which suggests faster storage there. The 20M set was re-warmed afterwards (95% resident).
 
 **Next.** Read the input with readahead and large parallel reads overlapped with parsing, instead of faulting the mapping page by page.
+
+### R3-READAHEAD
+
+Start one thread at process start that issues `readahead` in 1 MiB steps over the catalogs, then links, events and clicks in file order. The kernel caps each call, and 4 MiB steps stalled. Parse workers that reach a page still in flight wait for that read rather than issuing small read-around faults. Chunks are now ranked largest first in whole MiB, so the many full-size event chunks keep file order and arrive from a cold disk in the order they are read.
+
+Disk measurements on this host with the 20M input evicted: one `cat` stream 1.878 s for all 1.85 GB; eight parallel `cat`s 0.933 s; 8 MiB `pread`s from 4, 8, 16 or 32 threads 0.881, 0.925, 0.877 and 0.862 s; single-thread `readahead` in 1 MiB steps left everything resident after 0.866 s. `POSIX_FADV_WILLNEED` on whole files brought in only 6.6% of pages in 20 s, because the kernel caps it per call. About 2.1 GB/s is this disk's ceiling.
+
+Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Cold 20M medians of five, alternating with `4c905d6` on a host at load 5–7 from other builds: 1.736 vs 1.942, 1.867 vs 2.051, 1.949 vs 1.972 and 1.779 vs 2.026 s. Warm: three-pair screen 1.177 vs 1.232 s; five pairs 1.075 vs 1.019 s.
+
+**Kept** for the cold board path. Cold improved in every series. Warm was mixed under heavy load. Next, chunk planning without touching data removes the serial cold boundary and sample faults that remain ahead of parsing.
