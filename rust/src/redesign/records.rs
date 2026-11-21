@@ -1,4 +1,4 @@
-use crate::buckets::{self, IDS, Partitions, Runs, USERS, bucket};
+use crate::buckets::{self, IDS, Partitions, USERS, bucket};
 use crate::calendar::Calendar;
 use crate::key::PackedKey;
 use crate::scan::rows;
@@ -17,8 +17,8 @@ const INVALID: i64 = i64::MIN;
 
 pub struct Record<T> {
     id: PackedKey,
-    user: PackedKey,
-    payload: T,
+    pub user: PackedKey,
+    pub payload: T,
 }
 
 pub struct PendingEvent {
@@ -26,7 +26,8 @@ pub struct PendingEvent {
     event: Event,
 }
 
-pub trait Candidate: Send {
+pub trait Candidate: Send + Sync {
+    fn discard(&mut self);
     type Valid: Send;
     fn earlier(&self, other: &Self) -> bool;
     fn validate(self) -> Option<Self::Valid>;
@@ -34,6 +35,9 @@ pub trait Candidate: Send {
 
 impl Candidate for PendingEvent {
     type Valid = Event;
+    fn discard(&mut self) {
+        self.event.time = INVALID;
+    }
     fn earlier(&self, other: &Self) -> bool {
         self.ingest < other.ingest
     }
@@ -45,6 +49,9 @@ impl Candidate for PendingEvent {
 
 impl Candidate for Click {
     type Valid = Click;
+    fn discard(&mut self) {
+        self.time = INVALID;
+    }
     fn earlier(&self, _: &Self) -> bool {
         false
     }
@@ -59,11 +66,11 @@ pub fn parse_events(
     hash: &RandomState,
     window: Window,
     products: &Products,
-) -> Partitions<Record<PendingEvent>> {
+) -> Vec<Batch<PendingEvent>> {
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
-        || buckets::empty(IDS),
+        || vec![Batch::new()],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
@@ -95,23 +102,28 @@ pub fn parse_events(
                 } else {
                     INVALID
                 };
-                let slot = bucket(id.hash(hash, chunks), IDS);
-                out[slot].push(Record {
-                    id,
-                    user: PackedKey::new(user, chunk, i),
-                    payload: PendingEvent {
-                        ingest,
-                        event: Event {
-                            time,
-                            price,
-                            category,
+                let user = PackedKey::new(user, chunk, i);
+                append(
+                    out,
+                    id.hash(hash, chunks),
+                    user.hash(hash, chunks),
+                    Record {
+                        id,
+                        user,
+                        payload: PendingEvent {
+                            ingest,
+                            event: Event {
+                                time,
+                                price,
+                                category,
+                            },
                         },
                     },
-                });
+                );
             }
         },
     );
-    buckets::transpose(batches, IDS)
+    batches.into_iter().flatten().collect()
 }
 
 pub fn parse_clicks(
@@ -120,11 +132,11 @@ pub fn parse_clicks(
     hash: &RandomState,
     window: Window,
     campaigns: &Campaigns,
-) -> Partitions<Record<Click>> {
+) -> Vec<Batch<Click>> {
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
-        || buckets::empty(IDS),
+        || vec![Batch::new()],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
@@ -139,105 +151,176 @@ pub fn parse_clicks(
                 } else {
                     INVALID
                 };
-                out[bucket(id.hash(hash, chunks), IDS)].push(Record {
-                    id,
-                    user: PackedKey::new(user, chunk, i),
-                    payload: Click {
-                        time,
-                        campaign,
-                        location: Location::new(i, offset),
+                let user = PackedKey::new(user, chunk, i);
+                append(
+                    out,
+                    id.hash(hash, chunks),
+                    user.hash(hash, chunks),
+                    Record {
+                        id,
+                        user,
+                        payload: Click {
+                            time,
+                            campaign,
+                            location: Location::new(i, offset),
+                        },
                     },
-                });
+                );
             }
         },
     );
-    buckets::transpose(batches, IDS)
+    batches.into_iter().flatten().collect()
 }
 
-pub struct Named<T> {
-    pub user: PackedKey,
-    pub hash: u64,
-    pub data: T,
+// Only these eight bytes per row move through the ID partitions. Payloads
+// already belong to the user partition that will consume them.
+struct Ticket {
+    projection: u32,
+    slot: u32,
 }
 
-fn winners<T: Candidate>(
-    runs: Runs<Record<T>>,
+pub struct Batch<T> {
+    rows: Vec<Vec<Record<T>>>,
+    tickets: Vec<Vec<Ticket>>,
+}
+
+impl<T> Batch<T> {
+    fn new() -> Self {
+        Self {
+            rows: buckets::empty(USERS),
+            tickets: buckets::empty(IDS),
+        }
+    }
+
+    fn get(&self, slot: u32) -> &Record<T> {
+        &self.rows[bucket_of_slot(slot)][index_of_slot(slot)]
+    }
+}
+
+fn bucket_of_slot(slot: u32) -> usize {
+    slot as usize % USERS
+}
+fn index_of_slot(slot: u32) -> usize {
+    slot as usize / USERS
+}
+
+fn append<T>(batches: &mut Vec<Batch<T>>, id_hash: u64, user_hash: u64, row: Record<T>) {
+    let user = bucket(user_hash, USERS);
+    let max_index = u32::MAX as usize / USERS;
+    if batches.last().unwrap().rows[user].len() > max_index {
+        batches.push(Batch::new());
+    }
+    let batch = batches.last_mut().unwrap();
+    let slot = (batch.rows[user].len() * USERS + user) as u32;
+    batch.rows[user].push(row);
+    batch.tickets[bucket(id_hash, IDS)].push(Ticket {
+        projection: id_hash as u32,
+        slot,
+    });
+}
+
+#[derive(Clone, Copy)]
+struct Place {
+    batch: usize,
+    slot: u32,
+    projection: u32,
+}
+
+fn losers<T: Candidate>(
+    runs: Vec<(usize, Vec<Ticket>)>,
+    batches: &[Batch<T>],
     chunks: &[Mmap],
-    hash: &RandomState,
-    output: &mut [Vec<Named<T::Valid>>],
-) {
-    // A bit seen twice is only a candidate. Distinct IDs sharing that bit
-    // take the same exact table path as actual duplicate IDs.
-    let count: usize = runs.iter().map(Vec::len).sum();
+) -> Vec<Place> {
+    let count: usize = runs.iter().map(|(_, run)| run.len()).sum();
     let words = count.div_ceil(8).next_power_of_two();
     let mut seen = vec![0u64; words];
     let mut repeated = vec![0u64; words];
-    let position = |hash: u64| ((hash as usize >> 6) & (words - 1), 1u64 << (hash & 63));
+    let bit = |h: u32| ((h as usize >> 6) & (words - 1), 1u64 << (h & 63));
     let mut hits = 0;
-    for row in runs.iter().flatten() {
-        let (word, bit) = position(row.id.hash(hash, chunks));
-        let old = seen[word] & bit;
-        repeated[word] |= old;
-        seen[word] |= bit;
-        hits += usize::from(old != 0);
+    for (_, run) in &runs {
+        for ticket in run {
+            let (i, mask) = bit(ticket.projection);
+            let old = seen[i] & mask;
+            repeated[i] |= old;
+            seen[i] |= mask;
+            hits += usize::from(old != 0);
+        }
     }
-    let mut emit = |row: Record<T>| {
-        if let Some(data) = row.payload.validate() {
-            let hash = row.user.hash(hash, chunks);
-            output[bucket(hash, USERS)].push(Named {
-                user: row.user,
-                hash,
-                data,
-            });
-        }
-    };
-    let mut table: HashTable<Record<T>> = HashTable::with_capacity((2 * hits).min(count));
-    for row in runs.into_iter().flatten() {
-        let id_hash = row.id.hash(hash, chunks);
-        let (word, bit) = position(id_hash);
-        if repeated[word] & bit == 0 {
-            emit(row);
-            continue;
-        }
-        match table.entry(
-            id_hash,
-            |r| row.id.matches(r.id, chunks),
-            |r| r.id.hash(hash, chunks),
-        ) {
-            Entry::Vacant(entry) => {
-                entry.insert(row);
+    let mut table: HashTable<Place> = HashTable::with_capacity((2 * hits).min(count));
+    let mut lost = Vec::new();
+    let hash = |h: u32| u64::from(h).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for (batch, run) in runs {
+        for Ticket { projection, slot } in run {
+            let (word, mask) = bit(projection);
+            if repeated[word] & mask == 0 {
+                continue;
             }
-            Entry::Occupied(mut entry) => {
-                if row.payload.earlier(&entry.get().payload) {
-                    *entry.get_mut() = row;
+            let place = Place {
+                batch,
+                slot,
+                projection,
+            };
+            let row = || batches[batch].get(slot);
+            match table.entry(
+                hash(projection),
+                |stored| {
+                    stored.projection == projection
+                        && row()
+                            .id
+                            .matches(batches[stored.batch].get(stored.slot).id, chunks)
+                },
+                |stored| hash(stored.projection),
+            ) {
+                Entry::Vacant(entry) => {
+                    entry.insert(place);
+                }
+                Entry::Occupied(mut entry) => {
+                    let stored = entry.get_mut();
+                    let earlier = row()
+                        .payload
+                        .earlier(&batches[stored.batch].get(stored.slot).payload);
+                    lost.push(if earlier {
+                        std::mem::replace(stored, place)
+                    } else {
+                        place
+                    });
                 }
             }
         }
     }
-    for row in table {
-        emit(row);
-    }
+    lost
 }
 
-pub fn dedup<T: Candidate>(
-    index: Partitions<Record<T>>,
-    chunks: &[Mmap],
-    hash: &RandomState,
-) -> Partitions<Named<T::Valid>> {
-    // Reuse one set of destination buffers across several cache-sized ID tables.
-    let batch = index
-        .len()
-        .div_ceil(rayon::current_num_threads() * 2)
-        .max(1);
-    let groups = index
-        .into_par_iter()
-        .chunks(batch)
-        .map(|partitions| {
-            let mut out = buckets::empty(USERS);
-            for runs in partitions {
-                winners(runs, chunks, hash, &mut out);
+pub fn dedup<T: Candidate>(mut batches: Vec<Batch<T>>, chunks: &[Mmap]) -> Partitions<Record<T>> {
+    let mut partitions = buckets::empty(IDS);
+    for (i, batch) in batches.iter_mut().enumerate() {
+        for (shard, tickets) in partitions
+            .iter_mut()
+            .zip(std::mem::take(&mut batch.tickets))
+        {
+            if !tickets.is_empty() {
+                shard.push((i, tickets));
             }
-            out
+        }
+    }
+    let lost: Vec<_> = partitions
+        .into_par_iter()
+        .map(|runs| losers(runs, &batches, chunks))
+        .collect();
+    let mut discard = buckets::empty(batches.len());
+    for place in lost.into_iter().flatten() {
+        discard[place.batch].push(place.slot);
+    }
+    let groups = batches
+        .into_par_iter()
+        .zip(discard)
+        .map(|(mut batch, slots)| {
+            for slot in slots {
+                batch.rows[bucket_of_slot(slot)][index_of_slot(slot)]
+                    .payload
+                    .discard();
+            }
+            batch.rows
         })
         .collect();
     buckets::transpose(groups, USERS)

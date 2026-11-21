@@ -244,3 +244,16 @@ Cache exact Gregorian date prefixes in 32 per-chunk slots, selected by day of mo
 | calendar | 0.584 / 4.212 | 0.047 / 0.291 | 0.354 / 2.615 | 0.212 / 1.412 | 0.414 / 2.701 | 0.085 / 0.538 | 0.001 / 0.002 | 1.815 / 11.966 | 3.35 |
 
 **Kept.** Exhaustive single-byte mutations at every position in four date/offset examples matched the scalar parser, including leap-century cases and non-ASCII bytes. Native end-to-end and parse medians improved.
+
+### R3-TICKETS
+
+Partition payloads by user during parsing. Send an eight-byte projected ID and row slot through the ID radix instead of moving the payload again. Only repeated projections enter an exact-key table. Its loser slots are marked after all winners are known. The user owners discard losing and invalid rows during routing.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| calendar | 0.576 / 4.203 | 0.049 / 0.292 | 0.373 / 2.824 | 0.217 / 1.472 | 0.438 / 2.793 | 0.088 / 0.543 | 0.001 / 0.002 | 1.868 / 12.132 | 3.36 |
+| tickets | 0.686 / 5.019 | 0.043 / 0.276 | 0.148 / 1.069 | 0.208 / 1.500 | 0.415 / 2.769 | 0.094 / 0.535 | 0.001 / 0.002 | 1.755 / 11.659 | 3.42 |
+
+**Kept.** The extra parse scatter was cheaper than repartitioning and indexing every payload. The revised target is 0.75 s local native for a board score below 0.80 s.

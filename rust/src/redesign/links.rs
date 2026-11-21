@@ -1,6 +1,6 @@
 use crate::buckets::{self, Partitions, Runs, USERS, bucket};
 use crate::key::{Key, PackedKey};
-use crate::records::Named;
+use crate::records::{Candidate, PendingEvent, Record};
 use crate::scan::rows;
 use ahash::RandomState;
 use hashbrown::HashTable;
@@ -87,16 +87,19 @@ impl Directory {
             .1
     }
 
-    fn route<T>(
+    fn route<T: Candidate>(
         &mut self,
         shard: usize,
-        rows: Runs<Named<T>>,
+        rows: Runs<Record<T>>,
         state: &RandomState,
         chunks: &[Mmap],
-    ) -> Vec<Vec<PersonRow<T>>> {
+    ) -> Vec<Vec<PersonRow<T::Valid>>> {
         let mut output = buckets::empty(USERS);
         for row in rows.into_iter().flatten() {
-            let index = self.intern(row.user, row.hash, state, chunks) as usize;
+            let Some(data) = row.payload.validate() else {
+                continue;
+            };
+            let index = self.intern(row.user, row.user.hash(state, chunks), state, chunks) as usize;
             // Unlinked names are appended after the link-only root table.
             let root = self
                 .roots
@@ -105,7 +108,7 @@ impl Directory {
                 .unwrap_or_else(|| person(shard, index));
             output[owner(root)].push(PersonRow {
                 person: local(root) as u32,
-                data: row.data,
+                data,
             });
         }
         output
@@ -203,8 +206,8 @@ pub struct PeopleRows {
 
 pub fn resolve(
     dirs: Vec<Directory>,
-    events: Partitions<Named<Event>>,
-    clicks: Partitions<Named<Click>>,
+    events: Partitions<Record<PendingEvent>>,
+    clicks: Partitions<Record<Click>>,
     state: &RandomState,
     chunks: &[Mmap],
 ) -> PeopleRows {
