@@ -334,44 +334,75 @@ fn deliver<T>(parts: &mut Partitions<PersonRow<T>>, forwards: Vec<Vec<Vec<Person
     }
 }
 
-pub fn resolve<E: Candidate, C: Candidate>(
+/// Directories after their partitions' events have been resolved.
+pub struct ResolvedEvents<E> {
+    dirs: Vec<Directory>,
+    events: Partitions<PersonRow<E>>,
+}
+
+/// Resolve events first, so click deduplication can run alongside.
+pub fn resolve_events<E: Candidate>(
     dirs: Vec<Directory>,
     mut events: Vec<Batch<E>>,
+    state: &RandomState,
+    chunks: &[Mmap],
+) -> ResolvedEvents<E> {
+    let event_runs = take_runs(&mut events);
+    drop(events);
+    let resolved: Vec<_> = dirs
+        .into_par_iter()
+        .zip(event_runs)
+        .enumerate()
+        .map(|(shard, (mut dir, events))| {
+            let (events, forwards) = dir.convert_runs(shard, events, state, chunks);
+            (dir, events, forwards)
+        })
+        .collect();
+    let mut dirs = Vec::with_capacity(USERS);
+    let mut parts = Vec::with_capacity(USERS);
+    let mut forwards = Vec::with_capacity(USERS);
+    for (dir, events, f) in resolved {
+        dirs.push(dir);
+        parts.push(events);
+        forwards.push(f);
+    }
+    deliver(&mut parts, forwards);
+    ResolvedEvents {
+        dirs,
+        events: parts,
+    }
+}
+
+pub fn resolve_clicks<E, C: Candidate>(
+    resolved: ResolvedEvents<E>,
     mut clicks: Vec<Batch<C>>,
     state: &RandomState,
     chunks: &[Mmap],
 ) -> PeopleRows<E, C> {
-    let event_runs = take_runs(&mut events);
     let click_runs = take_runs(&mut clicks);
-    drop((events, clicks));
-    let resolved: Vec<_> = dirs
+    drop(clicks);
+    let converted: Vec<_> = resolved
+        .dirs
         .into_par_iter()
-        .zip(event_runs)
         .zip(click_runs)
         .enumerate()
-        .map(|(shard, ((mut dir, events), clicks))| {
-            let (events, event_forwards) = dir.convert_runs(shard, events, state, chunks);
-            let (clicks, click_forwards) = dir.convert_runs(shard, clicks, state, chunks);
-            (dir.names, events, clicks, event_forwards, click_forwards)
+        .map(|(shard, (mut dir, clicks))| {
+            let (clicks, forwards) = dir.convert_runs(shard, clicks, state, chunks);
+            (dir.names, clicks, forwards)
         })
         .collect();
     let mut names = Vec::with_capacity(USERS);
-    let mut event_parts = Vec::with_capacity(USERS);
-    let mut click_parts = Vec::with_capacity(USERS);
-    let mut event_forwards = Vec::with_capacity(USERS);
-    let mut click_forwards = Vec::with_capacity(USERS);
-    for (partition, events, clicks, ef, cf) in resolved {
+    let mut parts = Vec::with_capacity(USERS);
+    let mut forwards = Vec::with_capacity(USERS);
+    for (partition, clicks, f) in converted {
         names.push(partition);
-        event_parts.push(events);
-        click_parts.push(clicks);
-        event_forwards.push(ef);
-        click_forwards.push(cf);
+        parts.push(clicks);
+        forwards.push(f);
     }
-    deliver(&mut event_parts, event_forwards);
-    deliver(&mut click_parts, click_forwards);
+    deliver(&mut parts, forwards);
     PeopleRows {
         names,
-        events: event_parts,
-        clicks: click_parts,
+        events: resolved.events,
+        clicks: parts,
     }
 }

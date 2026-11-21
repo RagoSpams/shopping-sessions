@@ -153,10 +153,13 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
         campaign_index,
     );
     timer.end(Stage::Parse);
-    let clicks = records::dedup(click_index, hash, chunks);
+    // Event resolution needs no clicks, so it runs beside click deduplication.
+    let (clicks, resolved) = rayon::join(
+        || records::dedup(click_index, hash, chunks),
+        || links::resolve_events(directory, events, hash, chunks),
+    );
     timer.end(Stage::Dedup);
-
-    let people = links::resolve(directory, events, clicks, hash, chunks);
+    let people = links::resolve_clicks(resolved, clicks, hash, chunks);
     timer.end(Stage::Resolve);
     let user_dir = output.join("user_daily");
     let campaign_dir = output.join("campaign_daily");
