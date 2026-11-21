@@ -3,8 +3,8 @@ use crate::output::CampaignDay;
 use crate::time::{DAY_MS, LOOKBACK_MS, SESSION_GAP_MS};
 use ahash::AHashMap;
 use memmap2::Mmap;
-use std::borrow::Borrow;
 use parquet::errors::Result;
+use std::borrow::Borrow;
 
 pub struct PersonRow<T> {
     pub person: u32,
@@ -63,7 +63,9 @@ impl<'a> Attribution<'a> {
     pub fn new(chunks: &'a [Mmap], campaign_count: usize) -> Self {
         Self {
             chunks,
-            campaigns: (0..campaign_count).map(|_| ActiveCampaign::default()).collect(),
+            campaigns: (0..campaign_count)
+                .map(|_| ActiveCampaign::default())
+                .collect(),
             active: Vec::new(),
             left: 0,
             right: 0,
@@ -244,7 +246,15 @@ pub fn process(
         };
         let (matched, rest) = clicks.split_at(end);
         clicks = rest;
-        daily.process_person(person, events, |r| r.data, matched, attribution, campaign_days, &mut emit)?;
+        daily.process_person(
+            person,
+            events,
+            |r| r.data,
+            matched,
+            attribution,
+            campaign_days,
+            &mut emit,
+        )?;
     }
     Ok(())
 }

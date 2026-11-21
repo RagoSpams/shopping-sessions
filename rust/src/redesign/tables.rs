@@ -3,18 +3,24 @@ use crate::key::Key;
 use memmap2::Mmap;
 use parquet::errors::Result;
 use rayon::prelude::*;
-use shopping_sessions::aggregate::{UserDay, Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow};
+use shopping_sessions::aggregate::{
+    Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow, UserDay,
+};
 use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
-use std::{fs, io};
 use std::path::Path;
+use std::{fs, io};
 
 use shopping_sessions::output::CampaignDay;
-use shopping_sessions::time::{DAY_MS, Window};
+use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window};
 
 // Limit scratch per worker for long windows or large campaign catalogs.
 enum Totals {
-    Dense { first: i32, campaigns: usize, rows: Vec<CampaignDay> },
+    Dense {
+        first: i32,
+        campaigns: usize,
+        rows: Vec<CampaignDay>,
+    },
     Sparse(CampaignDays),
 }
 
@@ -23,13 +29,16 @@ impl Totals {
         let first = window.start.div_euclid(DAY_MS) as i32;
         let last = (window.end - 1).div_euclid(DAY_MS) as i32;
         let days = (i64::from(last) - i64::from(first) + 1).max(0) as usize;
-        if let Some(size) = days.checked_mul(campaigns)
+        if let Some(size) = days
+            .checked_mul(campaigns)
             .filter(|&n| n <= (8 << 20) / size_of::<CampaignDay>())
         {
             Self::Dense {
                 first,
                 campaigns,
-                rows: std::iter::repeat_with(CampaignDay::default).take(size).collect(),
+                rows: std::iter::repeat_with(CampaignDay::default)
+                    .take(size)
+                    .collect(),
             }
         } else {
             Self::Sparse(CampaignDays::new())
@@ -38,10 +47,17 @@ impl Totals {
 
     fn merge_into(self, all: &mut CampaignDays) {
         match self {
-            Self::Dense { first, campaigns, rows } => {
+            Self::Dense {
+                first,
+                campaigns,
+                rows,
+            } => {
                 for (index, totals) in rows.into_iter().enumerate() {
                     if totals.sessions != 0 || totals.assists != 0 {
-                        let key = ((index % campaigns) as u32, first + (index / campaigns) as i32);
+                        let key = (
+                            (index % campaigns) as u32,
+                            first + (index / campaigns) as i32,
+                        );
                         all.entry(key).or_default().merge(totals);
                     }
                 }
@@ -59,9 +75,11 @@ impl CampaignTotals for Totals {
     #[inline]
     fn daily(&mut self, campaign: u32, day: i32) -> &mut CampaignDay {
         match self {
-            Self::Dense { first, campaigns, rows } => {
-                &mut rows[(day - *first) as usize * *campaigns + campaign as usize]
-            }
+            Self::Dense {
+                first,
+                campaigns,
+                rows,
+            } => &mut rows[(day - *first) as usize * *campaigns + campaign as usize],
             Self::Sparse(rows) => rows.daily(campaign, day),
         }
     }
@@ -175,6 +193,31 @@ fn order_people<T, U: Copy, K: Ord>(
     Groups { rows, ends }
 }
 
+fn process_groups<T>(
+    events: &Groups<T>,
+    clicks: &Groups<Click>,
+    decode: impl Fn(&T) -> Event,
+    user_day: &mut UserDay,
+    attribution: &mut Attribution<'_>,
+    totals: &mut Totals,
+    emit: &mut impl FnMut(u32, i32, i64, i64, i64, Option<u32>) -> Result<()>,
+) -> Result<()> {
+    for (person, (events, clicks)) in events.groups().zip(clicks.groups()).enumerate() {
+        if !events.is_empty() {
+            user_day.process_person(
+                person as u32,
+                events,
+                &decode,
+                clicks,
+                attribution,
+                totals,
+                emit,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn aggregate(
     names: &[Vec<Key>],
     events: Partitions<PersonRow<Event>>,
@@ -184,6 +227,12 @@ pub fn aggregate(
     campaigns: &Campaigns,
     window: Window,
 ) -> Result<(Vec<UserColumns>, CampaignColumns)> {
+    const PRICE_BITS: u32 = (MAX_PRICE_CENTS as u32).ilog2() + 1;
+    const PRICE_MASK: u32 = (1 << PRICE_BITS) - 1;
+    // A compact event holds the exact window-relative millisecond and payload.
+    // Wider catalogs or windows keep the full timestamp and category fields.
+    let can_pack = window.end - window.start <= i64::from(u32::MAX) + 1
+        && products.categories.len() <= (1 << (32 - PRICE_BITS));
     let parallelism = rayon::current_num_threads().min(USERS);
     let size = USERS.div_ceil(parallelism);
     let parts: Vec<_> = events
@@ -201,33 +250,60 @@ pub fn aggregate(
                     continue;
                 }
                 let people = names[shard].len();
-                let events = order_people(events, people, |e| e, |e| e.time);
                 let clicks = order_people(clicks, people, |c| c, |c| c.time);
                 let mut emit = |id: u32, day, sessions, count, revenue, top: Option<u32>| {
-                        daily.user_id.push(names[shard][id as usize].bytes(chunks));
-                        daily.day.push(day);
-                        daily.sessions.push(sessions);
-                        daily.events.push(count);
-                        daily.revenue_cents.push(revenue);
-                        let row = daily.day.len() - 1;
-                        if row % 8 == 0 {
-                            daily.category_validity.push(0);
-                        }
-                        if let Some(id) = top {
-                            daily.category_validity[row / 8] |= 1 << (row % 8);
-                            daily.top_category.push(&products.categories[id as usize]);
-                        } else {
-                            daily.top_category.push(&[]);
-                        }
-                        Ok(())
-                    };
-                for (person, (events, clicks)) in events.groups().zip(clicks.groups()).enumerate() {
-                    if !events.is_empty() {
-                        user_day.process_person(
-                            person as u32, events, |event| *event, clicks,
-                            &mut attribution, &mut totals, &mut emit,
-                        )?;
+                    daily.user_id.push(names[shard][id as usize].bytes(chunks));
+                    daily.day.push(day);
+                    daily.sessions.push(sessions);
+                    daily.events.push(count);
+                    daily.revenue_cents.push(revenue);
+                    let row = daily.day.len() - 1;
+                    if row % 8 == 0 {
+                        daily.category_validity.push(0);
                     }
+                    if let Some(id) = top {
+                        daily.category_validity[row / 8] |= 1 << (row % 8);
+                        daily.top_category.push(&products.categories[id as usize]);
+                    } else {
+                        daily.top_category.push(&[]);
+                    }
+                    Ok(())
+                };
+                if can_pack {
+                    let events = order_people(
+                        events,
+                        people,
+                        |event| {
+                            let time = (event.time - window.start) as u64;
+                            let payload = (event.category << PRICE_BITS) | event.price;
+                            (time << 32) | u64::from(payload)
+                        },
+                        |key| *key,
+                    );
+                    process_groups(
+                        &events,
+                        &clicks,
+                        |&key| Event {
+                            time: window.start + (key >> 32) as i64,
+                            price: (key as u32) & PRICE_MASK,
+                            category: (key as u32) >> PRICE_BITS,
+                        },
+                        &mut user_day,
+                        &mut attribution,
+                        &mut totals,
+                        &mut emit,
+                    )?;
+                } else {
+                    let events = order_people(events, people, |e| e, |e| e.time);
+                    process_groups(
+                        &events,
+                        &clicks,
+                        |e| *e,
+                        &mut user_day,
+                        &mut attribution,
+                        &mut totals,
+                        &mut emit,
+                    )?;
                 }
             }
             Ok((daily, totals))
