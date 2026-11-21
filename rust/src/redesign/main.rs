@@ -8,6 +8,8 @@ mod tables;
 mod timing;
 
 use ahash::RandomState;
+use memmap2::UncheckedAdvice;
+use rayon::prelude::*;
 use shopping_sessions::catalog::{Campaigns, Products, load_window, path};
 use shopping_sessions::csv::read_chunks;
 use shopping_sessions::time::{LOOKBACK_MS, Window};
@@ -87,8 +89,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     timer.end(Stage::Aggregate);
     // The output columns own their strings and numbers. After aggregation
-    // no output writer can refer to the input mappings.
-    let (_, written) = rayon::join(|| drop(chunks), || tables::write(&output, &users, &daily));
+    // no output writer can refer to the input mappings. Discarding their
+    // page-table entries takes the address-space lock shared, so the workers
+    // clear separate mappings concurrently and exit only removes empty ones.
+    let (_, written) = rayon::join(
+        || {
+            chunks.par_iter().for_each(|chunk| {
+                let _ = unsafe { chunk.unchecked_advise(UncheckedAdvice::DontNeed) };
+            })
+        },
+        || tables::write(&output, &users, &daily),
+    );
     written?;
     timer.end(Stage::Write);
     timer.print();
