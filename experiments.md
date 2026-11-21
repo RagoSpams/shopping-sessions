@@ -426,6 +426,19 @@ Batch 32 row hashes and prefetch the corresponding exact linear alias slots befo
 
 **Kept.** Batched probing lowered both resolve CPU and wall and improved the full-process median.
 
+### R3-USERS128
+
+Increase the user fanout from 32 to 128 after introducing batched linear alias probes, reducing the working set of each active directory.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| prefetch | 0.678 / 4.292 | 0.051 / 0.305 | 0.170 / 0.940 | 0.273 / 1.592 | 0.443 / 2.740 | 0.089 / 0.467 | 0.001 / 0.002 | 1.829 / 10.503 | 3.07 |
+| user128 | 0.590 / 4.157 | 0.047 / 0.288 | 0.149 / 0.960 | 0.170 / 1.270 | 0.383 / 2.574 | 0.086 / 0.556 | 0.001 / 0.002 | 1.559 / 9.743 | 3.13 |
+
+**Kept.** The smaller directories reduced resolve CPU and end-to-end wall.
+
 ## Output experiments on the partition-local redesign
 
 Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.
