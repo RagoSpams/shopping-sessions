@@ -16,7 +16,7 @@ const DATA_PAGE: i32 = 0;
 impl Column<'_> {
     fn physical_type(&self) -> i32 {
         match self {
-            Self::Date(_) => 1,                       // INT32
+            Self::Date(_) | Self::Narrow(_) => 1,     // INT32
             Self::Int(_) => 2,                        // INT64
             Self::String(_) | Self::Nullable(_) => 6, // BYTE_ARRAY
         }
@@ -125,7 +125,7 @@ pub(super) fn footer(
                 let annotation = match column {
                     Column::String(_) | Column::Nullable(_) => Some((0, 1)), // UTF8 / STRING
                     Column::Date(_) => Some((6, 6)),                         // DATE / DATE
-                    Column::Int(_) => None,
+                    Column::Int(_) | Column::Narrow(_) => None,
                 };
                 if let Some((converted, logical)) = annotation {
                     leaf.i32(6, converted);

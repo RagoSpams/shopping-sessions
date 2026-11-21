@@ -60,9 +60,9 @@ impl UserDaily<'_> {
             &[
                 ("user_id", Column::String(self.user_id)),
                 ("day", Column::Date(self.day)),
-                ("sessions", Column::Int(self.sessions)),
-                ("events", Column::Int(self.events)),
-                ("revenue_cents", Column::Int(self.revenue_cents)),
+                ("sessions", Column::int(self.sessions)),
+                ("events", Column::int(self.events)),
+                ("revenue_cents", Column::int(self.revenue_cents)),
                 ("top_category", Column::Nullable(self.top_category)),
             ],
         )
@@ -80,10 +80,10 @@ impl CampaignDaily<'_> {
                 ("campaign_id", Column::String(self.campaign_id)),
                 ("channel", Column::String(self.channel)),
                 ("day", Column::Date(self.day)),
-                ("sessions", Column::Int(self.sessions)),
-                ("purchasing_sessions", Column::Int(self.purchasing_sessions)),
-                ("revenue_cents", Column::Int(self.revenue_cents)),
-                ("assisted_sessions", Column::Int(self.assisted_sessions)),
+                ("sessions", Column::int(self.sessions)),
+                ("purchasing_sessions", Column::int(self.purchasing_sessions)),
+                ("revenue_cents", Column::int(self.revenue_cents)),
+                ("assisted_sessions", Column::int(self.assisted_sessions)),
             ],
         )
     }
@@ -94,6 +94,20 @@ enum Column<'a> {
     Nullable(NullableStrings<'a>),
     Date(&'a [i32]),
     Int(&'a [i64]),
+    /// 64-bit values that all fit in 32 bits, stored as INT32.
+    Narrow(&'a [i64]),
+}
+
+impl<'a> Column<'a> {
+    /// Any integer width is accepted, so a column whose values all fit in
+    /// 32 bits is written in half the bytes.
+    fn int(values: &'a [i64]) -> Self {
+        if values.iter().all(|&value| i32::try_from(value).is_ok()) {
+            Self::Narrow(values)
+        } else {
+            Self::Int(values)
+        }
+    }
 }
 
 struct Chunk {
@@ -119,7 +133,7 @@ fn write_table(
                     && values.validity.len() == rows.div_ceil(8)
             }
             Column::Date(values) => values.len() == rows,
-            Column::Int(values) => values.len() == rows,
+            Column::Int(values) | Column::Narrow(values) => values.len() == rows,
         };
         if !valid {
             return Err(invalid(&format!("invalid column length for {name}")));
@@ -143,6 +157,7 @@ fn write_table(
                 Column::Nullable(values) => writer.strings(values.values, Some(values.validity))?,
                 Column::Date(values) => writer.integers(values, i32::to_le)?,
                 Column::Int(values) => writer.integers(values, i64::to_le)?,
+                Column::Narrow(values) => writer.narrow(values)?,
             }
             chunks.push(Chunk {
                 offset,
@@ -184,6 +199,20 @@ impl Pages {
             let bytes = unsafe { std::slice::from_raw_parts(page.as_ptr().cast::<u8>(), len) };
             self.page(page.len(), len)?;
             self.file.write_all(bytes)?;
+        }
+        Ok(())
+    }
+
+    fn narrow(&mut self, values: &[i64]) -> io::Result<()> {
+        for page in values.chunks(PAGE_ROWS) {
+            self.strings.clear();
+            for &value in page {
+                // The caller checked that every value fits.
+                self.strings
+                    .extend_from_slice(&(value as i32).to_le_bytes());
+            }
+            self.page(page.len(), self.strings.len())?;
+            self.file.write_all(&self.strings)?;
         }
         Ok(())
     }
