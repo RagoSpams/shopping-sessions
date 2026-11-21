@@ -15,6 +15,15 @@ use std::error::Error;
 use std::num::NonZeroUsize;
 use timing::{Stage, Timings};
 
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// jemalloc reads this pointer before main. The NUL-terminated string lives
+// for the entire process. The kernel may satisfy these hints with normal pages.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: Option<&std::ffi::c_char> =
+    unsafe { c"thp:always,metadata_thp:always".as_ptr().as_ref() };
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut timer = Timings::new();
     let input = path("DATA_DIR", "/data");
