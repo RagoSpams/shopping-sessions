@@ -8,7 +8,6 @@ use hashbrown::{HashTable, hash_table::Entry};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{Click, Event};
-use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::csv::Location;
 use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window, bounded_uint};
 use std::ops::Range;
@@ -148,10 +147,9 @@ pub fn parse_events<E: EventCodec>(
     range: Range<usize>,
     hash: &RandomState,
     window: Window,
-    products: &Products,
+    products: &Dimension,
 ) -> Vec<Batch<E>> {
     let expected = rows_per_worker::<E>(chunks, range.clone());
-    let products = Dimension::new(&products.ids, products.unknown);
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
@@ -208,10 +206,9 @@ pub fn parse_clicks(
     range: Range<usize>,
     hash: &RandomState,
     window: Window,
-    campaigns: &Campaigns,
+    campaigns: &Dimension,
 ) -> Vec<Batch<Click>> {
     let expected = rows_per_worker::<Click>(chunks, range.clone());
-    let campaigns = Dimension::new(&campaigns.ids, 0);
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),

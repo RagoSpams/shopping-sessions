@@ -44,17 +44,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     timer.end(Stage::Setup);
 
     let window = load_window(&input.join("manifest.json"))?;
-    let products = Products::read(&input.join("products.csv"))?;
-    let campaigns = Campaigns::read(&input.join("campaigns.csv"))?;
+    // Catalogs load on one worker while the others parse and join the links.
     const CHUNK: usize = 8 * 1024 * 1024;
-    let mut chunks = read_chunks(&input.join("links"), CHUNK)?;
-    let links_end = chunks.len();
-    chunks.extend(read_chunks(&input.join("events"), CHUNK)?);
-    let events_end = chunks.len();
-    chunks.extend(read_chunks(&input.join("clicks"), CHUNK)?);
-    let link_batch = links::parse(&chunks, 0..links_end, &hash);
-    timer.end(Stage::Parse);
-    let directory = links::build(link_batch, &chunks);
+    let (catalogs, linked) = rayon::join(
+        || -> std::io::Result<_> {
+            Ok((
+                dims::products(&input.join("products.csv"))?,
+                dims::campaigns(&input.join("campaigns.csv"))?,
+            ))
+        },
+        || -> std::io::Result<_> {
+            let mut chunks = read_chunks(&input.join("links"), CHUNK)?;
+            let links_end = chunks.len();
+            chunks.extend(read_chunks(&input.join("events"), CHUNK)?);
+            let events_end = chunks.len();
+            chunks.extend(read_chunks(&input.join("clicks"), CHUNK)?);
+            let link_batch = links::parse(&chunks, 0..links_end, &hash);
+            let directory = links::build(link_batch, &chunks);
+            Ok((chunks, links_end, events_end, directory))
+        },
+    );
+    let ((products, product_index), (campaigns, campaign_index)) = catalogs?;
+    let (chunks, links_end, events_end, directory) = linked?;
     timer.end(Stage::Links);
 
     let inputs = Inputs {
@@ -64,7 +75,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         hash: &hash,
         window,
         products: &products,
+        product_index: &product_index,
         campaigns: &campaigns,
+        campaign_index: &campaign_index,
         output: &output,
     };
     // Events travel as one sortable word whenever the window and catalog fit.
@@ -85,7 +98,9 @@ struct Inputs<'a> {
     hash: &'a RandomState,
     window: Window,
     products: &'a Products,
+    product_index: &'a dims::Dimension,
     campaigns: &'a Campaigns,
+    campaign_index: &'a dims::Dimension,
     output: &'a Path,
 }
 
@@ -101,13 +116,15 @@ fn run<E: records::EventCodec + tables::EventRows>(
         hash,
         window,
         products,
+        product_index,
         campaigns,
+        campaign_index,
         output,
     } = inputs;
     // Retiring the event dedup index before building the click index also
     // bounds peak working memory on the 60M workload.
     let event_index =
-        records::parse_events::<E>(chunks, links_end..events_end, hash, window, products);
+        records::parse_events::<E>(chunks, links_end..events_end, hash, window, product_index);
     timer.end(Stage::Parse);
     let events = records::dedup(event_index, hash, chunks);
     timer.end(Stage::Dedup);
@@ -120,7 +137,7 @@ fn run<E: records::EventCodec + tables::EventRows>(
         events_end..chunks.len(),
         hash,
         clicks_window,
-        campaigns,
+        campaign_index,
     );
     timer.end(Stage::Parse);
     let clicks = records::dedup(click_index, hash, chunks);

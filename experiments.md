@@ -546,3 +546,16 @@ Prefault each input chunk's cached file pages with `MADV_POPULATE_READ` before p
 36/36 fixtures were not run. Three alternating single 20M runs against `965fab4` measured 1.08/0.89/0.94 s vs 1.04/0.91/0.92 s end to end, with system CPU 1.34/0.94/1.03 vs 1.32/0.91/1.04 s.
 
 **Reverted.** Fewer minor faults did not lower system time or wall time; fault-around already maps cached file pages in 64 KiB groups.
+
+### R3-CATALOG
+
+Load products and campaigns directly into the packed-word index, with category IDs in byte order and no intermediate string maps, on one worker while the others map the inputs, parse the links and join them. The Links column now covers that whole startup join, and Parse covers only events and clicks.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| pk16 | 0.664 / 4.628 | 0.053 / 0.357 | 0.125 / 0.856 | 0.151 / 1.148 | 0.242 / 1.850 | 0.001 / 0.001 | 0.008 / 0.013 | 1.279 / 8.855 | 2.85 |
+| catalogs | 0.506 / 3.787 | 0.080 / 0.467 | 0.115 / 0.811 | 0.132 / 1.030 | 0.236 / 1.836 | 0.001 / 0.001 | 0.005 / 0.009 | 1.104 / 8.022 | 2.83 |
+
+**Kept.** The serial product catalog had taken 13.5–20.5 ms before link parsing began. Five pairs measured 1.104 vs 1.279 s and 8.02 vs 8.86 CPU-s on a loaded host; the three-pair screen measured 1.007 vs 1.044 s. All three edge sets still match.
