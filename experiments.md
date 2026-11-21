@@ -596,3 +596,11 @@ Interleave each dedup partition's seen and repeated bitmap words so both tests f
 Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `9c4f186`: dedup 0.085 vs 0.088 s, end to end 0.868 vs 0.826 s.
 
 **Reverted.** Dedup time did not fall.
+
+### R3-PROVISION
+
+Pre-create the event parse batches and let one helper thread map their pages with `MADV_POPULATE_WRITE`, 256 KiB per buffer per round, front to back while the workers parse.
+
+Screen: 36/36 fixtures, dev and s3-3m MATCH. Three alternating 20M pairs against `9c4f186`: parse 0.396 vs 0.435 s, system CPU 0.986 vs 1.197 s, end to end 0.803 vs 0.881 s.
+
+**Reverted.** On this host the helper's page provisioning competed with the workers and raised kernel time instead of replacing their faults. With the earlier input prefault (R3-POPREAD) and the jemalloc huge-page comparison, this exhausts the provisioning lever here; the kept reduction came from smaller rows (R3-PACKED).
