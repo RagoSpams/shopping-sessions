@@ -726,3 +726,16 @@ Also force inlining of the timestamp dispatcher and the resolve directory's prob
 Full gate: 36/36 fixtures, both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m, and all three edge sets MATCH. Screens against `941cddb`: 0.856 vs 0.861 s and 0.775 vs 0.768 s end to end; CPU 6.471 vs 6.257 and 5.824 vs 5.708 s. Five pairs: 0.812 vs 0.831 s and 6.087 vs 5.856 CPU-s.
 
 **Reverted.** CPU fell 2–4% in every series, but wall time did not improve.
+
+### R3-COLD · 20M with the input evicted from the page cache
+
+Before each run, `posix_fadvise(POSIX_FADV_DONTNEED)` dropped every file of s5-20m, and `mincore` confirmed 0 of 458,392 pages resident. Five runs per build under the exclusive timing lock, CPUs 0–7, eight workers.
+
+| Build | Cold runs (s) | Cold median | Warm median of 5 |
+|---|---|---:|---:|
+| `aaf2481` | 1.620, 1.717, 1.718, 1.732, 1.646 | 1.717 s | 0.752 s |
+| `941cddb` | 1.728, 1.661, 1.608, 1.629, 1.613 | 1.629 s | 0.815 s on a loaded host |
+
+The first cold runs of `aaf2481` spent 1.07–1.14 s parsing (warm about 0.38–0.41 s) and 0.21–0.24 s in the link stage (warm about 0.043 s). Reading cold input dominates. A single cold `cat` of the s3-3m events read about 630 MB/s on this WSL2 disk, so local cold is slower than the board's 1.18 s, which suggests faster storage there. The 20M set was re-warmed afterwards (95% resident).
+
+**Next.** Read the input with readahead and large parallel reads overlapped with parsing, instead of faulting the mapping page by page.
