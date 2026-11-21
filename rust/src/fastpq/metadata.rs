@@ -8,17 +8,19 @@ const BINARY: u8 = 8;
 const LIST: u8 = 9;
 const STRUCT: u8 = 12;
 
-const PLAIN: i32 = 0;
+pub(super) const PLAIN: i32 = 0;
 const RLE: i32 = 3;
+pub(super) const RLE_DICTIONARY: i32 = 8;
 const UNCOMPRESSED: i32 = 0;
 const DATA_PAGE: i32 = 0;
+const DICTIONARY_PAGE: i32 = 2;
 
 impl Column<'_> {
     fn physical_type(&self) -> i32 {
         match self {
-            Self::Date(_) | Self::Narrow(_) => 1,     // INT32
-            Self::Int(_) => 2,                        // INT64
-            Self::String(_) | Self::Nullable(_) => 6, // BYTE_ARRAY
+            Self::Date(_) | Self::Narrow(_) => 1,  // INT32
+            Self::Int(_) => 2,                     // INT64
+            Self::String(_) | Self::Dict(..) => 6, // BYTE_ARRAY
         }
     }
 }
@@ -88,7 +90,20 @@ impl Compact<'_> {
     }
 }
 
-pub(super) fn page_header(out: &mut Vec<u8>, rows: i32, bytes: i32) {
+pub(super) fn dictionary_header(out: &mut Vec<u8>, entries: i32, bytes: i32) {
+    out.clear();
+    structure(out, |page| {
+        page.i32(1, DICTIONARY_PAGE);
+        page.i32(2, bytes); // uncompressed_page_size
+        page.i32(3, bytes); // compressed_page_size
+        page.structure(7, |dictionary| {
+            dictionary.i32(1, entries);
+            dictionary.i32(2, PLAIN);
+        });
+    });
+}
+
+pub(super) fn page_header(out: &mut Vec<u8>, rows: i32, bytes: i32, encoding: i32) {
     out.clear();
     structure(out, |page| {
         page.i32(1, DATA_PAGE);
@@ -96,7 +111,7 @@ pub(super) fn page_header(out: &mut Vec<u8>, rows: i32, bytes: i32) {
         page.i32(3, bytes); // compressed_page_size
         page.structure(5, |data| {
             data.i32(1, rows);
-            data.i32(2, PLAIN);
+            data.i32(2, encoding);
             data.i32(3, RLE); // definition_level_encoding
             data.i32(4, RLE); // repetition_level_encoding
         });
@@ -120,11 +135,11 @@ pub(super) fn footer(
         for (name, column) in columns {
             structure(schema, |leaf| {
                 leaf.i32(1, column.physical_type());
-                leaf.i32(3, i32::from(matches!(column, Column::Nullable(_))));
+                leaf.i32(3, i32::from(column.optional()));
                 leaf.str(4, name);
                 let annotation = match column {
-                    Column::String(_) | Column::Nullable(_) => Some((0, 1)), // UTF8 / STRING
-                    Column::Date(_) => Some((6, 6)),                         // DATE / DATE
+                    Column::String(_) | Column::Dict(..) => Some((0, 1)), // UTF8 / STRING
+                    Column::Date(_) => Some((6, 6)),                      // DATE / DATE
                     Column::Int(_) | Column::Narrow(_) => None,
                 };
                 if let Some((converted, logical)) = annotation {
@@ -143,18 +158,28 @@ pub(super) fn footer(
                         entry.i64(2, 0); // Deprecated file_offset
                         entry.structure(3, |meta| {
                             meta.i32(1, column.physical_type());
-                            let optional = matches!(column, Column::Nullable(_));
-                            let encodings = meta.list(2, I32, 1 + usize::from(optional));
+                            let optional = column.optional();
+                            let encodings = meta.list(
+                                2,
+                                I32,
+                                1 + usize::from(optional) + usize::from(chunk.dictionary),
+                            );
                             integer(encodings, i64::from(PLAIN));
                             if optional {
                                 integer(encodings, i64::from(RLE));
+                            }
+                            if chunk.dictionary {
+                                integer(encodings, i64::from(RLE_DICTIONARY));
                             }
                             binary(meta.list(3, BINARY, 1), name);
                             meta.i32(4, UNCOMPRESSED);
                             meta.i64(5, rows); // num_values includes nulls
                             meta.i64(6, chunk.size); // total_uncompressed_size
                             meta.i64(7, chunk.size); // total_compressed_size
-                            meta.i64(9, chunk.offset); // data_page_offset
+                            meta.i64(9, chunk.data); // data_page_offset
+                            if chunk.dictionary {
+                                meta.i64(11, chunk.offset); // dictionary_page_offset
+                            }
                         });
                     });
                 }

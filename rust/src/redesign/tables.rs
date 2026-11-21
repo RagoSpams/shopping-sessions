@@ -2,13 +2,13 @@ use crate::buckets::{Partitions, USERS};
 use crate::key::Key;
 use crate::records::PackedEvent;
 use memmap2::Mmap;
-use parquet::errors::Result;
+use parquet::errors::{ParquetError, Result};
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{
     Attribution, CampaignDays, CampaignTotals, Click, Event, PersonRow, UserDay,
 };
 use shopping_sessions::catalog::{Campaigns, Products};
-use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
+use shopping_sessions::fastpq::{CampaignDaily, Dictionary, Strings, UserDaily};
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
@@ -191,13 +191,28 @@ impl TextColumn {
 
 #[derive(Default)]
 pub struct UserColumns {
-    user_id: TextColumn,
+    // String columns are dictionary indices. A person's rows are consecutive,
+    // so each name is stored once; categories are numbered on first use.
+    names: TextColumn,
+    last_person: Option<(usize, u32)>,
+    user_id: Vec<u32>,
     day: Vec<i32>,
     sessions: Vec<i64>,
     events: Vec<i64>,
     revenue_cents: Vec<i64>,
-    top_category: TextColumn,
-    category_validity: Vec<u8>,
+    categories: TextColumn,
+    category_index: Vec<u32>,
+    top_category: Vec<u32>,
+}
+
+impl UserColumns {
+    fn dictionary_index(len: usize) -> Result<u32> {
+        // Each dictionary is far smaller than the u32 index space.
+        u32::try_from(len - 1)
+            .ok()
+            .filter(|&index| index != Dictionary::NULL)
+            .ok_or_else(|| ParquetError::General("dictionary index overflow".into()))
+    }
 }
 
 #[derive(Default)]
@@ -408,7 +423,10 @@ pub fn aggregate<E: EventRows>(
                 let taken = shards[shard].lock().unwrap().take();
                 Some((shard, taken.unwrap()))
             });
-            let mut daily = UserColumns::default();
+            let mut daily = UserColumns {
+                category_index: vec![Dictionary::NULL; products.categories.len()],
+                ..UserColumns::default()
+            };
             let mut user_day = UserDay::default();
             let mut sort_scratch = Vec::new();
             let mut totals = Totals::new(window, campaigns.values.len());
@@ -425,21 +443,30 @@ pub fn aggregate<E: EventRows>(
                     |rows| rows.sort_unstable_by_key(|c| c.time),
                 );
                 let mut emit = |id: u32, day, sessions, count, revenue, top: Option<u32>| {
-                    daily.user_id.push(names[shard][id as usize].bytes(chunks));
+                    if daily.last_person != Some((shard, id)) {
+                        daily.last_person = Some((shard, id));
+                        daily.names.push(names[shard][id as usize].bytes(chunks));
+                    }
+                    let user = UserColumns::dictionary_index(daily.names.offsets.len() - 1)?;
+                    daily.user_id.push(user);
                     daily.day.push(day);
                     daily.sessions.push(sessions);
                     daily.events.push(count);
                     daily.revenue_cents.push(revenue);
-                    let row = daily.day.len() - 1;
-                    if row % 8 == 0 {
-                        daily.category_validity.push(0);
-                    }
-                    if let Some(id) = top {
-                        daily.category_validity[row / 8] |= 1 << (row % 8);
-                        daily.top_category.push(&products.categories[id as usize]);
-                    } else {
-                        daily.top_category.push(&[]);
-                    }
+                    let top = match top {
+                        Some(id) => {
+                            let index = &mut daily.category_index[id as usize];
+                            if *index == Dictionary::NULL {
+                                daily.categories.push(&products.categories[id as usize]);
+                                *index = UserColumns::dictionary_index(
+                                    daily.categories.offsets.len() - 1,
+                                )?;
+                            }
+                            *index
+                        }
+                        None => Dictionary::NULL,
+                    };
+                    daily.top_category.push(top);
                     Ok(())
                 };
                 let events = order_people(events, people, E::sorted, |rows| {
@@ -477,14 +504,17 @@ pub fn aggregate<E: EventRows>(
 
 fn write_users(path: &Path, batch: &UserColumns) -> io::Result<()> {
     UserDaily {
-        user_id: batch.user_id.strings()?,
+        user_id: Dictionary {
+            values: batch.names.strings()?,
+            indices: &batch.user_id,
+        },
         day: &batch.day,
         sessions: &batch.sessions,
         events: &batch.events,
         revenue_cents: &batch.revenue_cents,
-        top_category: NullableStrings {
-            values: batch.top_category.strings()?,
-            validity: &batch.category_validity,
+        top_category: Dictionary {
+            values: batch.categories.strings()?,
+            indices: &batch.top_category,
         },
     }
     .write(path)

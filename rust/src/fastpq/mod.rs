@@ -20,23 +20,26 @@ pub struct Strings<'a> {
     pub data: &'a str,
 }
 
-/// The bitmap stores one bit per row, least significant bit first.
-/// A set bit marks a present value. Unused bits in the last byte are ignored.
-/// Offsets for rows with clear bits may describe empty or ignored values.
+/// Dictionary-encoded strings: one index per row into `values`. With a
+/// nullable column, `NULL` marks a missing value.
 #[derive(Clone, Copy)]
-pub struct NullableStrings<'a> {
+pub struct Dictionary<'a> {
     pub values: Strings<'a>,
-    pub validity: &'a [u8],
+    pub indices: &'a [u32],
+}
+
+impl Dictionary<'_> {
+    pub const NULL: u32 = u32::MAX;
 }
 
 pub struct UserDaily<'a> {
-    pub user_id: Strings<'a>,
+    pub user_id: Dictionary<'a>,
     /// Days since 1970-01-01.
     pub day: &'a [i32],
     pub sessions: &'a [i64],
     pub events: &'a [i64],
     pub revenue_cents: &'a [i64],
-    pub top_category: NullableStrings<'a>,
+    pub top_category: Dictionary<'a>,
 }
 
 pub struct CampaignDaily<'a> {
@@ -58,12 +61,12 @@ impl UserDaily<'_> {
             "user_daily",
             self.day.len(),
             &[
-                ("user_id", Column::String(self.user_id)),
+                ("user_id", Column::Dict(self.user_id, false)),
                 ("day", Column::Date(self.day)),
                 ("sessions", Column::int(self.sessions)),
                 ("events", Column::int(self.events)),
                 ("revenue_cents", Column::int(self.revenue_cents)),
-                ("top_category", Column::Nullable(self.top_category)),
+                ("top_category", Column::Dict(self.top_category, true)),
             ],
         )
     }
@@ -91,14 +94,19 @@ impl CampaignDaily<'_> {
 
 enum Column<'a> {
     String(Strings<'a>),
-    Nullable(NullableStrings<'a>),
     Date(&'a [i32]),
     Int(&'a [i64]),
     /// 64-bit values that all fit in 32 bits, stored as INT32.
     Narrow(&'a [i64]),
+    /// Strings with a dictionary page; the flag marks a nullable column.
+    Dict(Dictionary<'a>, bool),
 }
 
 impl<'a> Column<'a> {
+    fn optional(&self) -> bool {
+        matches!(self, Self::Dict(_, true))
+    }
+
     /// Any integer width is accepted, so a column whose values all fit in
     /// 32 bits is written in half the bytes.
     fn int(values: &'a [i64]) -> Self {
@@ -113,6 +121,9 @@ impl<'a> Column<'a> {
 struct Chunk {
     offset: i64,
     size: i64,
+    /// The first data page follows the dictionary page, if one was written.
+    data: i64,
+    dictionary: bool,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -128,12 +139,15 @@ fn write_table(
     for (name, column) in columns {
         let valid = match column {
             Column::String(values) => values.offsets.len().checked_sub(1) == Some(rows),
-            Column::Nullable(values) => {
-                values.values.offsets.len().checked_sub(1) == Some(rows)
-                    && values.validity.len() == rows.div_ceil(8)
-            }
             Column::Date(values) => values.len() == rows,
             Column::Int(values) | Column::Narrow(values) => values.len() == rows,
+            Column::Dict(values, optional) => {
+                let count = values.values.offsets.len().saturating_sub(1);
+                values.indices.len() == rows
+                    && values.indices.iter().all(|&index| {
+                        (index as usize) < count || (*optional && index == Dictionary::NULL)
+                    })
+            }
         };
         if !valid {
             return Err(invalid(&format!("invalid column length for {name}")));
@@ -143,6 +157,7 @@ fn write_table(
     let mut writer = Pages {
         file: File::create(path)?,
         offset: MAGIC.len() as i64,
+        data: 0,
         header: Vec::with_capacity(32),
         definitions: Vec::new(),
         strings: Vec::new(),
@@ -152,16 +167,24 @@ fn write_table(
     if rows != 0 {
         for (_, column) in columns {
             let offset = writer.offset;
+            writer.data = 0;
+            let mut dictionary = false;
             match column {
-                Column::String(values) => writer.strings(*values, None)?,
-                Column::Nullable(values) => writer.strings(values.values, Some(values.validity))?,
+                Column::String(values) => {
+                    writer.strings(rows, false, |row| text(*values, row).map(Some))?
+                }
                 Column::Date(values) => writer.integers(values, i32::to_le)?,
                 Column::Int(values) => writer.integers(values, i64::to_le)?,
                 Column::Narrow(values) => writer.narrow(values)?,
+                Column::Dict(values, optional) => {
+                    dictionary = writer.dictionary(*values, *optional)?;
+                }
             }
             chunks.push(Chunk {
                 offset,
                 size: writer.offset - offset,
+                data: writer.data,
+                dictionary,
             });
         }
     }
@@ -169,9 +192,18 @@ fn write_table(
     writer.file.write_all(&footer)
 }
 
+fn text(values: Strings<'_>, row: usize) -> io::Result<&str> {
+    values
+        .data
+        .get(values.offsets[row]..values.offsets[row + 1])
+        .ok_or_else(|| invalid("invalid UTF-8 string offsets"))
+}
+
 struct Pages {
     file: File,
     offset: i64,
+    /// Offset of the current column chunk's first data page.
+    data: i64,
     header: Vec<u8>,
     definitions: Vec<u8>,
     strings: Vec<u8>,
@@ -179,9 +211,16 @@ struct Pages {
 
 impl Pages {
     fn page(&mut self, rows: usize, bytes: usize) -> io::Result<()> {
+        self.encoded_page(rows, bytes, metadata::PLAIN)
+    }
+
+    fn encoded_page(&mut self, rows: usize, bytes: usize, encoding: i32) -> io::Result<()> {
         let size =
             i32::try_from(bytes).map_err(|_| invalid("Parquet data page exceeds i32 size"))?;
-        metadata::page_header(&mut self.header, rows as i32, size);
+        if self.data == 0 {
+            self.data = self.offset;
+        }
+        metadata::page_header(&mut self.header, rows as i32, size, encoding);
         self.file.write_all(&self.header)?;
         self.offset += self.header.len() as i64 + i64::from(size);
         Ok(())
@@ -217,28 +256,28 @@ impl Pages {
         Ok(())
     }
 
-    fn strings(&mut self, values: Strings<'_>, validity: Option<&[u8]>) -> io::Result<()> {
-        let rows = values.offsets.len() - 1;
+    fn strings<'v>(
+        &mut self,
+        rows: usize,
+        optional: bool,
+        value: impl Fn(usize) -> io::Result<Option<&'v str>>,
+    ) -> io::Result<()> {
         // A page containing one oversized value needs a four-byte value length.
         // Its optional definition levels take four bytes for length and two for the run.
-        let max_value = i32::MAX as usize - 4 - 6 * usize::from(validity.is_some());
+        let max_value = i32::MAX as usize - 4 - 6 * usize::from(optional);
+        let mut present = Vec::new();
         let mut start = 0;
         while start < rows {
             let limit = rows.min(start + PAGE_ROWS);
             self.strings.clear();
-            let estimate = values.offsets[limit].saturating_sub(values.offsets[start]);
-            self.strings
-                .reserve((estimate.min(PAGE_BYTES) + (limit - start) * 4).min(PAGE_BYTES));
+            present.clear();
             let mut end = start;
             while end < limit {
-                if validity.is_none_or(|bits| bits[end / 8] & (1 << (end % 8)) != 0) {
-                    let from = values.offsets[end];
-                    let to = values.offsets[end + 1];
-                    let value = values
-                        .data
-                        .get(from..to)
-                        .ok_or_else(|| invalid("invalid UTF-8 string offsets"))?;
+                let item = value(end)?;
+                present.push(item.is_some());
+                if let Some(value) = item {
                     if self.strings.len() + value.len() + 4 > PAGE_BYTES && end != start {
+                        present.pop();
                         break;
                     }
                     if value.len() > max_value {
@@ -255,8 +294,8 @@ impl Pages {
                 end += 1;
             }
             self.definitions.clear();
-            if let Some(bits) = validity {
-                definitions(&mut self.definitions, bits, start, end - start);
+            if optional {
+                definitions(&mut self.definitions, &present);
             }
             self.page(end - start, self.definitions.len() + self.strings.len())?;
             self.file.write_all(&self.definitions)?;
@@ -265,27 +304,98 @@ impl Pages {
         }
         Ok(())
     }
+
+    /// Writes a dictionary page and RLE-encoded index pages. Returns false
+    /// after falling back to plain pages for a dictionary too large for one page.
+    fn dictionary(&mut self, values: Dictionary<'_>, optional: bool) -> io::Result<bool> {
+        let rows = values.indices.len();
+        let count = values.values.offsets.len() - 1;
+        self.strings.clear();
+        for index in 0..count {
+            let value = text(values.values, index)?;
+            self.strings
+                .extend_from_slice(&(value.len() as u32).to_le_bytes());
+            self.strings.extend_from_slice(value.as_bytes());
+            if self.strings.len() > i32::MAX as usize {
+                break;
+            }
+        }
+        // An all-null column still gets a one-entry dictionary that no row uses.
+        let entries = count.max(1);
+        if count == 0 {
+            self.strings.extend_from_slice(&0u32.to_le_bytes());
+        }
+        if self.strings.len() > i32::MAX as usize {
+            return self
+                .strings(rows, optional, |row| match values.indices[row] {
+                    Dictionary::NULL => Ok(None),
+                    index => text(values.values, index as usize).map(Some),
+                })
+                .map(|()| false);
+        }
+        metadata::dictionary_header(&mut self.header, entries as i32, self.strings.len() as i32);
+        self.file.write_all(&self.header)?;
+        self.file.write_all(&self.strings)?;
+        self.offset += (self.header.len() + self.strings.len()) as i64;
+        let width = (u32::BITS - (entries as u32 - 1).leading_zeros()).max(1);
+        let bytes = width.div_ceil(8) as usize;
+        let mut present = Vec::new();
+        for page in values.indices.chunks(PAGE_ROWS) {
+            self.definitions.clear();
+            if optional {
+                present.clear();
+                present.extend(page.iter().map(|&index| index != Dictionary::NULL));
+                definitions(&mut self.definitions, &present);
+            }
+            // Indices are one RLE run per repeated value, after the bit width.
+            self.strings.clear();
+            self.strings.push(width as u8);
+            let mut indices = page
+                .iter()
+                .copied()
+                .filter(|&index| index != Dictionary::NULL);
+            if let Some(mut current) = indices.next() {
+                let mut run = 1u64;
+                let flush = |out: &mut Vec<u8>, value: u32, run: u64| {
+                    metadata::varint(out, run << 1);
+                    out.extend_from_slice(&value.to_le_bytes()[..bytes]);
+                };
+                for index in indices {
+                    if index == current {
+                        run += 1;
+                    } else {
+                        flush(&mut self.strings, current, run);
+                        current = index;
+                        run = 1;
+                    }
+                }
+                flush(&mut self.strings, current, run);
+            }
+            self.encoded_page(
+                page.len(),
+                self.definitions.len() + self.strings.len(),
+                metadata::RLE_DICTIONARY,
+            )?;
+            self.file.write_all(&self.definitions)?;
+            self.file.write_all(&self.strings)?;
+        }
+        Ok(true)
+    }
 }
 
-fn definitions(out: &mut Vec<u8>, bits: &[u8], start: usize, rows: usize) {
+fn definitions(out: &mut Vec<u8>, present: &[bool]) {
     // Data page v1 prefixes the definition levels with their encoded length.
     // One bit-packed hybrid run holds groups of eight one-bit levels.
-    let groups = rows.div_ceil(8);
+    let groups = present.len().div_ceil(8);
     out.extend_from_slice(&[0; 4]);
     metadata::varint(out, (groups as u64) << 1 | 1);
-    let base = start / 8;
-    let shift = start % 8;
-    let source = &bits[base..base + groups];
-    if shift == 0 {
-        out.extend_from_slice(source);
-    } else {
-        for (index, &byte) in source.iter().enumerate() {
-            let next = bits.get(base + index + 1).copied().unwrap_or(0);
-            out.push(byte >> shift | next << (8 - shift));
-        }
-    }
-    if rows % 8 != 0 {
-        *out.last_mut().unwrap() &= (1 << (rows % 8)) - 1;
+    for group in present.chunks(8) {
+        out.push(
+            group
+                .iter()
+                .enumerate()
+                .fold(0, |byte, (bit, &set)| byte | u8::from(set) << bit),
+        );
     }
     let len = (out.len() - 4) as u32;
     out[..4].copy_from_slice(&len.to_le_bytes());
