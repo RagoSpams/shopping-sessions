@@ -1,4 +1,5 @@
 mod buckets;
+mod calendar;
 mod key;
 mod links;
 mod records;
@@ -47,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let event_index =
         records::parse_events(&chunks, links_end..events_end, &hash, window, &products);
     timer.end(Stage::Parse);
-    let events = records::dedup(event_index, &chunks, &hash);
+    let events = records::dedup(event_index, &chunks);
     timer.end(Stage::Dedup);
     let clicks_window = Window {
         start: window.start - LOOKBACK_MS,
@@ -61,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &campaigns,
     );
     timer.end(Stage::Parse);
-    let clicks = records::dedup(click_index, &chunks, &hash);
+    let clicks = records::dedup(click_index, &chunks);
     timer.end(Stage::Dedup);
 
     let people = links::resolve(directory, events, clicks, &hash, &chunks);

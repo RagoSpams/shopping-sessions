@@ -232,6 +232,71 @@ Route validated identical-copy clicks straight to user partitions. Duplicate mul
 
 **Reverted.** The initial five-pair wall median increased. A second five-pair series measured 3.089 → 3.027 s, but the pooled ten-run medians were 2.928 → 2.930 s. CPU medians were 11.828 → 11.508 s. The wall gate was unmet.
 
+### R3-CALENDAR
+
+Cache exact Gregorian date prefixes in 32 per-chunk slots, selected by day of month. Reuse the scalar date decoder on misses. Validate the entire time-of-day mask and convert decimal pairs in one word. F2 offsets and F3 window checks remain exact.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.630 / 4.621 | 0.045 / 0.289 | 0.381 / 2.735 | 0.210 / 1.433 | 0.420 / 2.797 | 0.094 / 0.554 | 0.001 / 0.002 | 1.967 / 12.780 | 3.36 |
+| calendar | 0.584 / 4.212 | 0.047 / 0.291 | 0.354 / 2.615 | 0.212 / 1.412 | 0.414 / 2.701 | 0.085 / 0.538 | 0.001 / 0.002 | 1.815 / 11.966 | 3.35 |
+
+**Kept.** Exhaustive single-byte mutations at every position in four date/offset examples matched the scalar parser, including leap-century cases and non-ASCII bytes. Native end-to-end and parse medians improved.
+
+### R3-TICKETS
+
+Partition payloads by user during parsing. Send an eight-byte projected ID and row slot through the ID radix instead of moving the payload again. Only repeated projections enter an exact-key table. Its loser slots are marked after all winners are known. The user owners discard losing and invalid rows during routing.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| calendar | 0.576 / 4.203 | 0.049 / 0.292 | 0.373 / 2.824 | 0.217 / 1.472 | 0.438 / 2.793 | 0.088 / 0.543 | 0.001 / 0.002 | 1.868 / 12.132 | 3.36 |
+| tickets | 0.686 / 5.019 | 0.043 / 0.276 | 0.148 / 1.069 | 0.208 / 1.500 | 0.415 / 2.769 | 0.094 / 0.535 | 0.001 / 0.002 | 1.755 / 11.659 | 3.42 |
+
+**Kept.** The extra parse scatter was cheaper than repartitioning and indexing every payload. The revised target is 0.75 s local native for a board score below 0.80 s.
+
+### R3-TICKETS versus R3-PACK
+
+Independent cumulative comparison against the last reported native milestone.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.734 / 4.998 | 0.053 / 0.302 | 0.493 / 3.165 | 0.222 / 1.446 | 0.515 / 3.334 | 0.173 / 0.574 | 0.001 / 0.002 | 2.477 / 14.883 | 3.36 |
+| tickets | 0.780 / 5.538 | 0.050 / 0.285 | 0.158 / 1.108 | 0.238 / 1.690 | 0.429 / 2.929 | 0.094 / 0.590 | 0.001 / 0.002 | 1.939 / 12.413 | 3.42 |
+
+R3-TICKETS crossed the revised 10% milestone. The 0.75 s native target is still open.
+
+### R3-USERS32
+
+Reduce user/person fanout from 256 to 32 to shorten the parse write frontier. This also increases the populations of the individual alias directories.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| tickets | 0.850 / 4.547 | 0.074 / 0.260 | 0.229 / 1.003 | 0.322 / 1.402 | 0.769 / 2.821 | 0.135 / 0.493 | 0.003 / 0.002 | 2.705 / 10.712 | 3.36 |
+| user32 | 0.826 / 4.329 | 0.080 / 0.261 | 0.221 / 0.880 | 0.458 / 2.085 | 0.624 / 2.642 | 0.146 / 0.478 | 0.003 / 0.002 | 2.649 / 10.913 | 3.37 |
+
+**Kept.** Both five-pair series improved end-to-end wall on this host. Pooled medians were 2.678 → 2.648 s. Resolve CPU increased in both series. The next experiment removes its second directory lookup.
+
+### R3-ROOTVALUE
+
+After union, replace each alias table value with its canonical global person ID so successful lookups return the root without consulting a separate root array.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user32 | 0.838 / 4.516 | 0.048 / 0.265 | 0.268 / 0.897 | 0.553 / 2.054 | 0.684 / 2.775 | 0.135 / 0.473 | 0.001 / 0.002 | 2.716 / 11.127 | 3.34 |
+| rootvalue | 1.032 / 4.682 | 0.055 / 0.259 | 0.297 / 0.941 | 0.497 / 2.139 | 0.598 / 2.753 | 0.131 / 0.508 | 0.003 / 0.002 | 2.771 / 11.418 | 3.31 |
+
+**Reverted.** Resolve wall fell, but resolve CPU and end-to-end median rose.
+
 ## Output experiments on the partition-local redesign
 
 Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.
