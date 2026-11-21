@@ -85,6 +85,7 @@ The final 60M check took 10.55 s wall and 67.90 CPU-s at 10.02 GiB peak RSS. Its
 The calibration keeps fastpq standalone and uses the redesign's existing Parquet output. The root Dockerfile uses the digest-pinned Rust 1.90.0 builder with `-C target-feature=+crt-static -C target-cpu=x86-64-v3`. The resulting `linux/amd64` image uses `FROM scratch` and runs as UID and GID 1000.
 
 Native gates used Rust 1.100.0, `taskset -c 0-7`, and `NCPU=8`. Their single 20M runs took 7.40 s for the default and 4.26 s for the redesign. Docker gates used the scorer flags with CPUs 0–7 and the requested 24 GiB limit on a Docker Desktop VM with 15.62 GiB available. Hyperfine 2.0.0 measured Docker invocation through return, with one warmup and five measurements per image. Its prepare step emptied the output and scratch directories between runs. The cold rebuild reused the pinned base image and downloaded and compiled the locked dependencies afresh.
+
 ## Round 3
 
 ### R3-PROFILE · 20M parse self time
@@ -177,3 +178,15 @@ Build each short inline key from a masked 16-byte SIMD load when all 16 bytes li
 | widekey | 0.694 / 4.760 | 0.042 / 0.262 | 0.470 / 3.468 | 0.198 / 1.393 | 0.434 / 2.778 | 0.085 / 0.558 | 0.001 / 0.002 | 2.070 / 13.397 | 3.71 |
 
 **Reverted.** Parse CPU fell, but the five-pair end-to-end wall median increased.
+
+### R3-SCALE · calibration at 20M and 60M
+
+The release diagnostic build of calibration `b9c43d2` recorded counters at stage boundaries. Each CSV page was queried with `mincore` before launch. Cache residency was observed passively. CPU affinity and worker count matched the 20M gates. The second 60M output matched both tables of the previously validated seed-6 run, including 6,604,995 user/day and 28,014 campaign/day rows.
+
+| Input/run | CSV pages resident before run | Wall s | User + system CPU-s | Peak RSS GiB | Major faults | Parse CPU-s | Dedup CPU-s | Resolve CPU-s | Sessions CPU-s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20M | 100.00% | 2.24 | 12.60 + 2.21 | 3.81 | 0 | 6.16 | 3.09 | 1.34 | 3.25 |
+| 60M first | 38.38% | 11.41 | 50.82 + 16.95 | 9.96 | 46,480 | 35.86 | 13.15 | 5.56 | 9.94 |
+| 60M repeat | 88.43% | 8.11 | 47.41 + 7.64 | 10.35 | 7,866 | 21.48 | 14.42 | 5.51 | 10.51 |
+
+The first 60M run reproduced the previously reported 68 CPU-s. Of its 46,480 major faults, 46,466 had occurred by end-of-click-parse. Compared with that run, the repeat saved 14.39 parse CPU-s and 9.31 system CPU-s across the whole process. At end-of-click-parse in the repeat, RSS included 4.49 GiB anonymous and 5.28 GiB file-backed pages. The roughly 10 GiB peak includes the mapped CSV pages. Even at higher initial residency, dedup used 4.66× the 20M CPU and resolve used 4.11×. Larger local tables and different seed distributions remain plausible contributors. Hardware cache counters were unavailable.
