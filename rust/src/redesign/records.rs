@@ -60,6 +60,26 @@ impl Candidate for Click {
     }
 }
 
+// Estimate allocation sizes from complete sampled rows. All buffers still
+// grow normally when worker scheduling, malformed rows or skew change demand.
+fn rows_per_worker<T>(chunks: &[Mmap], range: Range<usize>) -> usize {
+    let workers = range.len().min(rayon::current_num_threads()).max(1);
+    let mut estimated = 0u128;
+    let mut bytes = 0u128;
+    for i in range {
+        let chunk = &chunks[i];
+        bytes += chunk.len() as u128;
+        let sample = &chunk[..chunk.len().min(4096)];
+        if let Some(end) = memchr::memrchr(b'\n', sample) {
+            let rows = memchr::memchr_iter(b'\n', &sample[..=end]).count();
+            estimated += chunk.len() as u128 * rows as u128 / (end + 1) as u128;
+        }
+    }
+    // Bound speculative capacity even if the sample consists of empty lines.
+    let limit = bytes * 2 / (size_of::<Record<T>>() + size_of::<Ticket>()) as u128;
+    ((estimated + estimated / 8).min(limit) / workers as u128) as usize
+}
+
 pub fn parse_events(
     chunks: &[Mmap],
     range: Range<usize>,
@@ -67,10 +87,11 @@ pub fn parse_events(
     window: Window,
     products: &Products,
 ) -> Vec<Batch<PendingEvent>> {
+    let expected = rows_per_worker::<PendingEvent>(chunks, range.clone());
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
-        || vec![Batch::new()],
+        || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
@@ -133,10 +154,11 @@ pub fn parse_clicks(
     window: Window,
     campaigns: &Campaigns,
 ) -> Vec<Batch<Click>> {
+    let expected = rows_per_worker::<Click>(chunks, range.clone());
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
-        || vec![Batch::new()],
+        || vec![Batch::new(expected)],
         |out, i| {
             let chunk = &chunks[i];
             let mut calendar = Calendar::new();
@@ -185,10 +207,14 @@ pub struct Batch<T> {
 }
 
 impl<T> Batch<T> {
-    fn new() -> Self {
+    fn new(expected: usize) -> Self {
         Self {
-            rows: buckets::empty(USERS),
-            tickets: buckets::empty(IDS),
+            rows: (0..USERS)
+                .map(|_| Vec::with_capacity(expected / USERS))
+                .collect(),
+            tickets: (0..IDS)
+                .map(|_| Vec::with_capacity(expected / IDS))
+                .collect(),
         }
     }
 
@@ -208,7 +234,7 @@ fn append<T>(batches: &mut Vec<Batch<T>>, id_hash: u64, user_hash: u64, row: Rec
     let user = bucket(user_hash, USERS);
     let max_index = u32::MAX as usize / USERS;
     if batches.last().unwrap().rows[user].len() > max_index {
-        batches.push(Batch::new());
+        batches.push(Batch::new(0));
     }
     let batch = batches.last_mut().unwrap();
     let slot = (batch.rows[user].len() * USERS + user) as u32;

@@ -296,3 +296,16 @@ After union, replace each alias table value with its canonical global person ID 
 | rootvalue | 1.032 / 4.682 | 0.055 / 0.259 | 0.297 / 0.941 | 0.497 / 2.139 | 0.598 / 2.753 | 0.131 / 0.508 | 0.003 / 0.002 | 2.771 / 11.418 | 3.31 |
 
 **Reverted.** Resolve wall fell, but resolve CPU and end-to-end median rose.
+
+### R3-RESERVE
+
+Estimate initial per-worker capacities using complete newline-terminated rows sampled from the first page of each mapping. Divide the estimate among shards, cap speculative bytes against the input size, and retain normal Vec growth for skew.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user32 | 0.573 / 4.218 | 0.046 / 0.320 | 0.123 / 0.871 | 0.239 / 1.768 | 0.364 / 2.630 | 0.071 / 0.433 | 0.001 / 0.002 | 1.534 / 10.324 | 3.38 |
+| reserve | 0.531 / 3.653 | 0.049 / 0.320 | 0.132 / 0.889 | 0.244 / 1.793 | 0.389 / 2.672 | 0.074 / 0.470 | 0.001 / 0.002 | 1.509 / 9.828 | 3.05 |
+
+**Kept.** Parse CPU and median wall fell with fewer reallocations. Peak RSS fell by 0.33 GiB.
