@@ -16,7 +16,7 @@ const PAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Offsets may start anywhere in `data`, allowing slices of a larger column.
 #[derive(Clone, Copy)]
 pub struct Strings<'a> {
-    pub offsets: &'a [u32],
+    pub offsets: &'a [usize],
     pub data: &'a str,
 }
 
@@ -197,14 +197,14 @@ impl Pages {
         while start < rows {
             let limit = rows.min(start + PAGE_ROWS);
             self.strings.clear();
-            let estimate = values.offsets[limit].saturating_sub(values.offsets[start]) as usize;
+            let estimate = values.offsets[limit].saturating_sub(values.offsets[start]);
             self.strings
                 .reserve((estimate.min(PAGE_BYTES) + (limit - start) * 4).min(PAGE_BYTES));
             let mut end = start;
             while end < limit {
                 if validity.is_none_or(|bits| bits[end / 8] & (1 << (end % 8)) != 0) {
-                    let from = values.offsets[end] as usize;
-                    let to = values.offsets[end + 1] as usize;
+                    let from = values.offsets[end];
+                    let to = values.offsets[end + 1];
                     let value = values
                         .data
                         .get(from..to)

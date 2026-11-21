@@ -85,3 +85,11 @@ The final 60M check took 10.55 s wall and 67.90 CPU-s at 10.02 GiB peak RSS. Its
 The calibration keeps fastpq standalone and uses the redesign's existing Parquet output. The root Dockerfile uses the digest-pinned Rust 1.90.0 builder with `-C target-feature=+crt-static -C target-cpu=x86-64-v3`. The resulting `linux/amd64` image uses `FROM scratch` and runs as UID and GID 1000.
 
 Native gates used Rust 1.100.0, `taskset -c 0-7`, and `NCPU=8`. Their single 20M runs took 7.40 s for the default and 4.26 s for the redesign. Docker gates used the scorer flags with CPUs 0–7 and the requested 24 GiB limit on a Docker Desktop VM with 15.62 GiB available. Hyperfine 2.0.0 measured Docker invocation through return, with one warmup and five measurements per image. Its prepare step emptied the output and scratch directories between runs. The cold rebuild reused the pinned base image and downloaded and compiled the locked dependencies afresh.
+
+## Output experiments on the partition-local redesign
+
+Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.
+
+| ID | Change | Correctness | Native 20M median wall / CPU | Disposition |
+| --- | --- | --- | --- | --- |
+| R3-OUT-1 | Emit contiguous strings, nullable bitmap and numeric columns for fastpq. Write one uncompressed PLAIN user file per worker batch and one campaign file. | 36/36 and five MATCHes | 2.035 s / 13.492 CPU-s vs main 2.218 s / 14.444 CPU-s. Separate five-run writer timing was 0.024 s. | Kept |

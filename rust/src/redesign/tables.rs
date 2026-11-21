@@ -5,39 +5,70 @@ use parquet::errors::Result;
 use rayon::prelude::*;
 use shopping_sessions::aggregate::{self, Attribution, CampaignDays, Click, Event, PersonRow};
 use shopping_sessions::catalog::{Campaigns, Products};
-use shopping_sessions::output::{self, CampaignDay, UserWriter};
-use std::fs;
+use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
+use std::{fs, io};
 use std::path::Path;
 
-#[derive(Default)]
-pub struct UserColumns<'a> {
-    pub user_id: Vec<&'a [u8]>,
-    pub day: Vec<i32>,
-    pub sessions: Vec<i64>,
-    pub events: Vec<i64>,
-    pub revenue_cents: Vec<i64>,
-    pub top_category: Vec<Option<&'a [u8]>>,
+struct TextColumn {
+    offsets: Vec<usize>,
+    bytes: Vec<u8>,
+}
+
+impl Default for TextColumn {
+    fn default() -> Self {
+        Self {
+            offsets: vec![0],
+            bytes: Vec::new(),
+        }
+    }
+}
+
+impl TextColumn {
+    fn push(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+        self.offsets.push(self.bytes.len());
+    }
+
+    fn strings(&self) -> io::Result<Strings<'_>> {
+        let data = std::str::from_utf8(&self.bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Strings {
+            data,
+            offsets: &self.offsets,
+        })
+    }
 }
 
 #[derive(Default)]
-pub struct CampaignColumns<'a> {
-    pub campaign_id: Vec<&'a [u8]>,
-    pub channel: Vec<&'a [u8]>,
-    pub day: Vec<i32>,
-    pub sessions: Vec<i64>,
-    pub purchasing_sessions: Vec<i64>,
-    pub revenue_cents: Vec<i64>,
-    pub assisted_sessions: Vec<i64>,
+pub struct UserColumns {
+    user_id: TextColumn,
+    day: Vec<i32>,
+    sessions: Vec<i64>,
+    events: Vec<i64>,
+    revenue_cents: Vec<i64>,
+    top_category: TextColumn,
+    category_validity: Vec<u8>,
 }
 
-pub fn aggregate<'a>(
-    names: &'a [Vec<Key>],
+#[derive(Default)]
+pub struct CampaignColumns {
+    campaign_id: TextColumn,
+    channel: TextColumn,
+    day: Vec<i32>,
+    sessions: Vec<i64>,
+    purchasing_sessions: Vec<i64>,
+    revenue_cents: Vec<i64>,
+    assisted_sessions: Vec<i64>,
+}
+
+pub fn aggregate(
+    names: &[Vec<Key>],
     events: Partitions<PersonRow<Event>>,
     clicks: Partitions<PersonRow<Click>>,
-    chunks: &'a [Mmap],
-    products: &'a Products,
-    campaigns: &'a Campaigns,
-) -> Result<(Vec<UserColumns<'a>>, CampaignColumns<'a>)> {
+    chunks: &[Mmap],
+    products: &Products,
+    campaigns: &Campaigns,
+) -> Result<(Vec<UserColumns>, CampaignColumns)> {
     let parallelism = rayon::current_num_threads().min(USERS);
     let size = USERS.div_ceil(parallelism);
     let parts: Vec<_> = events
@@ -64,9 +95,16 @@ pub fn aggregate<'a>(
                         daily.sessions.push(sessions);
                         daily.events.push(count);
                         daily.revenue_cents.push(revenue);
-                        daily
-                            .top_category
-                            .push(top.map(|id| products.categories[id as usize].as_ref()));
+                        let row = daily.day.len() - 1;
+                        if row % 8 == 0 {
+                            daily.category_validity.push(0);
+                        }
+                        if let Some(id) = top {
+                            daily.category_validity[row / 8] |= 1 << (row % 8);
+                            daily.top_category.push(&products.categories[id as usize]);
+                        } else {
+                            daily.top_category.push(&[]);
+                        }
                         Ok(())
                     },
                     &events,
@@ -100,50 +138,33 @@ pub fn aggregate<'a>(
     Ok((users, campaign))
 }
 
-// Adapter for the crate writer. The producer's columns can also be handed
-// directly to a fixed-schema writer without revisiting the session pipeline.
-pub fn write(
-    path: &Path,
-    users: &[UserColumns<'_>],
-    campaigns: &CampaignColumns<'_>,
-) -> Result<()> {
+pub fn write(path: &Path, users: &[UserColumns], campaigns: &CampaignColumns) -> io::Result<()> {
     let user_dir = path.join("user_daily");
     let campaign_dir = path.join("campaign_daily");
     fs::create_dir_all(&user_dir)?;
     fs::create_dir_all(&campaign_dir)?;
-    users
-        .par_iter()
-        .enumerate()
-        .try_for_each(|(i, batch)| -> Result<()> {
-            let mut writer =
-                UserWriter::with_encoding(&user_dir.join(format!("part-{i}.parquet")), true)?;
-            for row in 0..batch.day.len() {
-                writer.push(
-                    batch.user_id[row],
-                    batch.day[row],
-                    batch.sessions[row],
-                    batch.events[row],
-                    batch.revenue_cents[row],
-                    batch.top_category[row],
-                )?;
-            }
-            writer.finish()
-        })?;
-    output::campaign_file(
-        &campaign_dir.join("part-0.parquet"),
-        (0..campaigns.day.len()).map(|i| {
-            (
-                campaigns.campaign_id[i],
-                campaigns.channel[i],
-                campaigns.day[i],
-                CampaignDay {
-                    sessions: campaigns.sessions[i],
-                    purchasing: campaigns.purchasing_sessions[i],
-                    revenue: campaigns.revenue_cents[i],
-                    assists: campaigns.assisted_sessions[i],
-                },
-            )
-        }),
-        true,
-    )
+    users.par_iter().enumerate().try_for_each(|(i, batch)| {
+        UserDaily {
+            user_id: batch.user_id.strings()?,
+            day: &batch.day,
+            sessions: &batch.sessions,
+            events: &batch.events,
+            revenue_cents: &batch.revenue_cents,
+            top_category: NullableStrings {
+                values: batch.top_category.strings()?,
+                validity: &batch.category_validity,
+            },
+        }
+        .write(&user_dir.join(format!("part-{i}.parquet")))
+    })?;
+    CampaignDaily {
+        campaign_id: campaigns.campaign_id.strings()?,
+        channel: campaigns.channel.strings()?,
+        day: &campaigns.day,
+        sessions: &campaigns.sessions,
+        purchasing_sessions: &campaigns.purchasing_sessions,
+        revenue_cents: &campaigns.revenue_cents,
+        assisted_sessions: &campaigns.assisted_sessions,
+    }
+    .write(&campaign_dir.join("part-0.parquet"))
 }
