@@ -216,3 +216,5 @@ A separate paired run compares the cumulative candidate to the calibration ELF. 
 | packed | 0.736 / 4.197 | 0.097 / 0.279 | 0.395 / 2.310 | 0.374 / 1.315 | 0.950 / 2.813 | 0.176 / 0.502 | 0.001 / 0.002 | 3.199 / 11.621 | 3.36 |
 
 The cumulative improvement triggered the container gate.
+
+The root image for `53b6ea0` built in 53.61 s with the cached pinned Rust 1.90.0 base. It runs the static redesign in scratch as UID/GID 1000. With scorer isolation, CPUs 0–7 and NCPU=8 it passed 36/36 fixtures and all five frozen comparisons. The timed 20M output also matched. Docker wall median was 2.468 s, range 2.351–3.164 s, five after one warmup. The final five-pair native comparison was 3.979 to 3.199 s (19.6%) under shared load.
