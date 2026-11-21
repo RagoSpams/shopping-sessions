@@ -1,5 +1,5 @@
 use crate::buckets::{self, IDS, Partitions, Runs, USERS, bucket};
-use crate::key::Key;
+use crate::key::PackedKey;
 use crate::scan::rows;
 use ahash::RandomState;
 use hashbrown::{HashTable, hash_table::Entry};
@@ -15,8 +15,8 @@ use std::ops::Range;
 const INVALID: i64 = i64::MIN;
 
 pub struct Record<T> {
-    id: Key,
-    user: Key,
+    id: PackedKey,
+    user: PackedKey,
     payload: T,
 }
 
@@ -69,7 +69,7 @@ pub fn parse_events(
                 if id.is_empty() {
                     continue;
                 }
-                let id = Key::new(id, chunk, i);
+                let id = PackedKey::new(id, chunk, i);
                 // The rules guarantee a valid UTC whole-second ingest timestamp.
                 let ingest = calendar_ms(ingest).expect("invalid ingest timestamp");
                 let (price, category, valid_kind) = match kind {
@@ -96,7 +96,7 @@ pub fn parse_events(
                 let slot = bucket(id.hash(hash, chunks), IDS);
                 out[slot].push(Record {
                     id,
-                    user: Key::new(user, chunk, i),
+                    user: PackedKey::new(user, chunk, i),
                     payload: PendingEvent {
                         ingest,
                         event: Event {
@@ -129,7 +129,7 @@ pub fn parse_clicks(
                 if id.is_empty() {
                     continue;
                 }
-                let id = Key::new(id, chunk, i);
+                let id = PackedKey::new(id, chunk, i);
                 let campaign = campaigns.ids.get(campaign).copied().unwrap_or(0);
                 let time = if !user.is_empty() && campaign != 0 {
                     window.timestamp(ts).unwrap_or(INVALID)
@@ -138,7 +138,7 @@ pub fn parse_clicks(
                 };
                 out[bucket(id.hash(hash, chunks), IDS)].push(Record {
                     id,
-                    user: Key::new(user, chunk, i),
+                    user: PackedKey::new(user, chunk, i),
                     payload: Click {
                         time,
                         campaign,
@@ -152,7 +152,7 @@ pub fn parse_clicks(
 }
 
 pub struct Named<T> {
-    pub user: Key,
+    pub user: PackedKey,
     pub hash: u64,
     pub data: T,
 }
@@ -163,10 +163,41 @@ fn winners<T: Candidate>(
     hash: &RandomState,
     output: &mut [Vec<Named<T::Valid>>],
 ) {
-    let mut table: HashTable<Record<T>> = HashTable::with_capacity(runs.iter().map(Vec::len).sum());
+    // A bit seen twice is only a candidate. Distinct IDs sharing that bit
+    // take the same exact table path as actual duplicate IDs.
+    let count: usize = runs.iter().map(Vec::len).sum();
+    let words = count.div_ceil(8).next_power_of_two();
+    let mut seen = vec![0u64; words];
+    let mut repeated = vec![0u64; words];
+    let position = |hash: u64| ((hash as usize >> 6) & (words - 1), 1u64 << (hash & 63));
+    let mut hits = 0;
+    for row in runs.iter().flatten() {
+        let (word, bit) = position(row.id.hash(hash, chunks));
+        let old = seen[word] & bit;
+        repeated[word] |= old;
+        seen[word] |= bit;
+        hits += usize::from(old != 0);
+    }
+    let mut emit = |row: Record<T>| {
+        if let Some(data) = row.payload.validate() {
+            let hash = row.user.hash(hash, chunks);
+            output[bucket(hash, USERS)].push(Named {
+                user: row.user,
+                hash,
+                data,
+            });
+        }
+    };
+    let mut table: HashTable<Record<T>> = HashTable::with_capacity((2 * hits).min(count));
     for row in runs.into_iter().flatten() {
+        let id_hash = row.id.hash(hash, chunks);
+        let (word, bit) = position(id_hash);
+        if repeated[word] & bit == 0 {
+            emit(row);
+            continue;
+        }
         match table.entry(
-            row.id.hash(hash, chunks),
+            id_hash,
             |r| row.id.matches(r.id, chunks),
             |r| r.id.hash(hash, chunks),
         ) {
@@ -181,14 +212,7 @@ fn winners<T: Candidate>(
         }
     }
     for row in table {
-        if let Some(data) = row.payload.validate() {
-            let hash = row.user.hash(hash, chunks);
-            output[bucket(hash, USERS)].push(Named {
-                user: row.user,
-                hash,
-                data,
-            });
-        }
+        emit(row);
     }
 }
 

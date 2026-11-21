@@ -86,6 +86,152 @@ The calibration keeps fastpq standalone and uses the redesign's existing Parquet
 
 Native gates used Rust 1.100.0, `taskset -c 0-7`, and `NCPU=8`. Their single 20M runs took 7.40 s for the default and 4.26 s for the redesign. Docker gates used the scorer flags with CPUs 0–7 and the requested 24 GiB limit on a Docker Desktop VM with 15.62 GiB available. Hyperfine 2.0.0 measured Docker invocation through return, with one warmup and five measurements per image. Its prepare step emptied the output and scratch directories between runs. The cold rebuild reused the pinned base image and downloaded and compiled the locked dependencies afresh.
 
+## Round 3
+
+### R3-PROFILE · 20M parse self time
+
+The redesign control was `224d9d8`. The profiling build used Rust 1.90.0, the release optimization settings, debug information and frame pointers. Linux perf 7.0.14 recorded DWARF call graphs (4 KiB, 999 Hz, `cpu-clock:u`), pinned to CPUs 0–7 with eight workers. WSL reported hardware cycles unsupported. The unchanged release profile was used for timing comparisons.
+
+The three monotonic-clock windows from end-of-setup to end-of-link-parse, end-of-link-build to end-of-event-parse, and end-of-event-dedup to end-of-click-parse contain 4,767 user-mode samples. The recording lost zero samples. The profile run spent 0.846 s wall and 6.213 process CPU-s in parse, including kernel time. Percentages below divide each instruction's sample period by the total sampled period in those windows. Each instruction is assigned to its innermost DWARF function. This resolves scanner and record code that the non-inlined `perf report --no-children` displays under Rayon worker closures.
+
+| Rank | Function at sampled instruction | Samples | Parse self |
+|---:|---|---:|---:|
+| 1 | `core::ptr::write` | 1,340 | 28.11% |
+| 2 | `redesign::key::Key::new` | 445 | 9.34% |
+| 3 | `time::calendar_ms` | 387 | 8.12% |
+| 4 | `__memcpy_avx_unaligned_erms` | 349 | 7.32% |
+| 5 | `__memcmp_avx2_movbe` | 205 | 4.30% |
+| 6 | `time::digits` | 186 | 3.90% |
+| 7 | `redesign::scan::split` field closure | 133 | 2.79% |
+| 8 | `redesign::scan::split` | 125 | 2.62% |
+| 9 | `time::bounded_uint` | 111 | 2.33% |
+| 10 | `alloc::vec::Vec::push_mut` | 105 | 2.20% |
+| 11 | `redesign::records::parse_events` chunk closure | 100 | 2.10% |
+| 12 | `hashbrown::raw::RawTable::find` closure | 96 | 2.01% |
+| 13 | `_mm256_movemask_epi8` | 88 | 1.85% |
+| 14 | `u128::trailing_zeros` | 81 | 1.70% |
+| 15 | `u8::wrapping_sub` | 74 | 1.55% |
+
+The control already partitions before user interning and ID dedup. During event and click parsing, it scatters into 1,024 per-worker ID buffers and consults the catalogs. The sampled store cost motivates testing sequential output. The software clock does not measure cache misses.
+
+### R3-FLAT · sequential parse with deferred radix partitioning
+
+Each worker appended to one contiguous vector. Records contained 64-bit hashes for the record ID and the user, a mapped location for exact ID equality, and an inline-or-mapped user key. The parser performed no catalog or ID-table lookup. After parsing, a histogram sized the per-ID radix buffers, then each partition selected winners by full ID equality and earliest ingest. Only winners accessed the catalog. User interning and routing still used exact equality after partitioning on the user hash. Link endpoints also moved to contiguous streams.
+
+The release build passed 36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating Hyperfine pairs, both binaries warmed, eight workers on CPUs 0–7. Every entry is the median wall seconds / process CPU-seconds for that stage. End to end includes process exit.
+
+| Version | Parse | Links | Dedup + ID partition | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Control | 0.850 / 6.244 | 0.041 / 0.255 | 0.468 / 3.225 | 0.192 / 1.322 | 0.488 / 3.176 | 0.082 / 0.522 | 0.001 / 0.002 | 2.272 / 14.904 | 3.81 |
+| R3-FLAT | 0.562 / 3.934 | 0.058 / 0.291 | 1.083 / 7.769 | 0.191 / 1.272 | 0.436 / 3.018 | 0.077 / 0.488 | 0.001 / 0.002 | 2.587 / 17.152 | 3.93 |
+
+**Reverted.** Parse saved 2.310 CPU-s (37.0%). Moving wide records into 1,024 partitions and returning to input bytes for winners cost 4.544 extra CPU-s in dedup. End-to-end wall rose 13.9%.
+
+### R3-FILTER
+
+Within each existing ID partition, a bit seen just once proves the row unique. A second bitmap routes all potentially repeated keys to the exact winner table. The number of repeat hits bounds its initial capacity. Colliding projections only increase work.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| base | 0.936 / 6.931 | 0.047 / 0.289 | 0.506 / 3.527 | 0.215 / 1.501 | 0.512 / 3.469 | 0.086 / 0.560 | 0.001 / 0.002 | 2.438 / 16.420 | 3.81 |
+| filter | 0.922 / 6.799 | 0.041 / 0.265 | 0.405 / 2.930 | 0.222 / 1.542 | 0.511 / 3.383 | 0.090 / 0.580 | 0.001 / 0.002 | 2.385 / 15.826 | 3.82 |
+
+**Kept.** The smaller winner tables reduced dedup CPU and end-to-end time.
+
+### R3-GROUP
+
+Use dense partition-local person IDs for a counting scatter of events and clicks. Sort timestamps within each resulting person range before sessionization and attribution.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| filter | 0.806 / 5.919 | 0.040 / 0.251 | 0.336 / 2.400 | 0.190 / 1.287 | 0.452 / 2.968 | 0.079 / 0.479 | 0.001 / 0.002 | 2.063 / 13.486 | 3.80 |
+| grouped | 0.852 / 6.251 | 0.038 / 0.245 | 0.338 / 2.442 | 0.192 / 1.334 | 0.391 / 2.547 | 0.075 / 0.470 | 0.001 / 0.002 | 2.034 / 13.308 | 3.80 |
+
+**Kept.** Person ordering and aggregation used less CPU and wall time, and the end-to-end median improved.
+
+### R3-RADIX64
+
+Reduce initial record-ID radix fanout from 1,024 to 64 after adopting selective dedup. This tests a shorter active write frontier without copying the full streams in a separate pass.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| grouped | 0.809 / 5.934 | 0.052 / 0.329 | 0.341 / 2.405 | 0.185 / 1.285 | 0.398 / 2.557 | 0.081 / 0.529 | 0.001 / 0.002 | 2.043 / 13.330 | 3.82 |
+| coarse | 0.684 / 4.968 | 0.038 / 0.242 | 0.402 / 3.015 | 0.185 / 1.302 | 0.393 / 2.585 | 0.079 / 0.515 | 0.001 / 0.002 | 1.939 / 12.722 | 3.69 |
+
+**Kept.** The lower parse cost outweighed the larger partition-local candidate tables. Calibration scored 2.28 s on the board. The local native target is about 0.85 s.
+
+### R3-WIDEKEY
+
+Build each short inline key from a masked 16-byte SIMD load when all 16 bytes lie in the mapping. Retain the scalar copy at the tail.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| coarse | 0.718 / 5.088 | 0.041 / 0.251 | 0.456 / 3.323 | 0.195 / 1.335 | 0.393 / 2.709 | 0.084 / 0.543 | 0.001 / 0.002 | 2.019 / 13.511 | 3.71 |
+| widekey | 0.694 / 4.760 | 0.042 / 0.262 | 0.470 / 3.468 | 0.198 / 1.393 | 0.434 / 2.778 | 0.085 / 0.558 | 0.001 / 0.002 | 2.070 / 13.397 | 3.71 |
+
+**Reverted.** Parse CPU fell, but the five-pair end-to-end wall median increased.
+
+### R3-SCALE · calibration at 20M and 60M
+
+The release diagnostic build of calibration `b9c43d2` recorded counters at stage boundaries. Each CSV page was queried with `mincore` before launch. Cache residency was observed passively. CPU affinity and worker count matched the 20M gates. The second 60M output matched both tables of the previously validated seed-6 run, including 6,604,995 user/day and 28,014 campaign/day rows.
+
+| Input/run | CSV pages resident before run | Wall s | User + system CPU-s | Peak RSS GiB | Major faults | Parse CPU-s | Dedup CPU-s | Resolve CPU-s | Sessions CPU-s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20M | 100.00% | 2.24 | 12.60 + 2.21 | 3.81 | 0 | 6.16 | 3.09 | 1.34 | 3.25 |
+| 60M first | 38.38% | 11.41 | 50.82 + 16.95 | 9.96 | 46,480 | 35.86 | 13.15 | 5.56 | 9.94 |
+| 60M repeat | 88.43% | 8.11 | 47.41 + 7.64 | 10.35 | 7,866 | 21.48 | 14.42 | 5.51 | 10.51 |
+
+The first 60M run reproduced the previously reported 68 CPU-s. Of its 46,480 major faults, 46,466 had occurred by end-of-click-parse. Compared with that run, the repeat saved 14.39 parse CPU-s and 9.31 system CPU-s across the whole process. At end-of-click-parse in the repeat, RSS included 4.49 GiB anonymous and 5.28 GiB file-backed pages. The roughly 10 GiB peak includes the mapped CSV pages. Even at higher initial residency, dedup used 4.66× the 20M CPU and resolve used 4.11×. Larger local tables and different seed distributions remain plausible contributors. Hardware cache counters were unavailable.
+
+### R3-PACK
+
+Represent up to nine 7-bit characters losslessly in one word. An explicit mapped form handles other lengths, high bytes, and nonempty fields ending in NUL. Materialize byte strings only for distinct directory names. Exact byte comparisons resolve mapped-key hash collisions.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| coarse | 0.931 / 4.740 | 0.055 / 0.285 | 0.581 / 2.893 | 0.481 / 1.305 | 1.007 / 3.177 | 0.174 / 0.604 | 0.003 / 0.003 | 3.689 / 13.477 | 3.70 |
+| packed | 0.965 / 4.728 | 0.124 / 0.285 | 0.553 / 2.473 | 0.564 / 1.428 | 0.917 / 3.060 | 0.170 / 0.520 | 0.005 / 0.002 | 3.397 / 13.055 | 3.35 |
+
+**Kept.** The string round-trip and equality test covered quoting, length boundaries, NUL, UTF-8 and CR. The parser boundary test also passed. Smaller records reduced peak RSS and improved end-to-end wall time on a contended host.
+
+### R3-PACK versus calibration
+
+A separate paired run compares the cumulative candidate to the calibration ELF. Host contention elevated absolute wall time in this series.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| base | 1.357 / 6.515 | 0.079 / 0.253 | 0.620 / 3.129 | 0.374 / 1.416 | 1.034 / 3.481 | 0.160 / 0.581 | 0.002 / 0.002 | 3.979 / 15.499 | 3.81 |
+| packed | 0.736 / 4.197 | 0.097 / 0.279 | 0.395 / 2.310 | 0.374 / 1.315 | 0.950 / 2.813 | 0.176 / 0.502 | 0.001 / 0.002 | 3.199 / 11.621 | 3.36 |
+
+The cumulative improvement triggered the container gate.
+
+The root image for `53b6ea0` built in 53.61 s with the cached pinned Rust 1.90.0 base. It runs the static redesign in scratch as UID/GID 1000. With scorer isolation, CPUs 0–7 and NCPU=8 it passed 36/36 fixtures and all five frozen comparisons. The timed 20M output also matched. Docker wall median was 2.468 s, range 2.351–3.164 s, five after one warmup. The final five-pair native comparison was 3.979 to 3.199 s (19.6%) under shared load.
+
+### R3-DIRECTCLICK
+
+Route validated identical-copy clicks straight to user partitions. Duplicate multiplicity leaves both latest-click credit and the set of assisting campaigns unchanged.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| packed | 0.853 / 4.258 | 0.086 / 0.264 | 0.495 / 2.310 | 0.352 / 1.303 | 0.602 / 2.755 | 0.134 / 0.476 | 0.001 / 0.002 | 2.767 / 11.676 | 3.37 |
+| directclick | 0.825 / 4.174 | 0.074 / 0.290 | 0.378 / 1.853 | 0.313 / 1.278 | 0.772 / 2.990 | 0.158 / 0.510 | 0.003 / 0.002 | 2.922 / 11.705 | 3.32 |
+
+**Reverted.** The initial five-pair wall median increased. A second five-pair series measured 3.089 → 3.027 s, but the pooled ten-run medians were 2.928 → 2.930 s. CPU medians were 11.828 → 11.508 s. The wall gate was unmet.
+
 ## Output experiments on the partition-local redesign
 
 Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.

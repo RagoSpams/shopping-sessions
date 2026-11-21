@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub const IDS: usize = 1024;
+pub const IDS: usize = 64;
 pub const USERS: usize = 256;
 pub type Runs<T> = Vec<Vec<T>>;
 pub type Partitions<T> = Vec<Runs<T>>;
@@ -49,14 +49,6 @@ pub fn transpose<T>(batches: Vec<Vec<Vec<T>>>, count: usize) -> Partitions<T> {
                 dst.push(run);
             }
         }
-    }
-    out
-}
-
-pub fn flatten<T>(runs: Runs<T>) -> Vec<T> {
-    let mut out = Vec::with_capacity(runs.iter().map(Vec::len).sum());
-    for run in runs {
-        out.extend(run);
     }
     out
 }
