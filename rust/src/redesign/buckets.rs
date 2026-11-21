@@ -38,17 +38,3 @@ pub fn consume_chunks<B: Send>(
         })
         .collect()
 }
-
-pub fn transpose<T>(batches: Vec<Vec<Vec<T>>>, count: usize) -> Partitions<T> {
-    let mut out: Vec<_> = (0..count)
-        .map(|_| Vec::with_capacity(batches.len()))
-        .collect();
-    for batch in batches {
-        for (dst, run) in out.iter_mut().zip(batch) {
-            if !run.is_empty() {
-                dst.push(run);
-            }
-        }
-    }
-    out
-}
