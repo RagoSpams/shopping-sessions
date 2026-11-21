@@ -297,6 +297,84 @@ After union, replace each alias table value with its canonical global person ID 
 
 **Reverted.** Resolve wall fell, but resolve CPU and end-to-end median rose.
 
+### R3-RESERVE
+
+Estimate initial per-worker capacities using complete newline-terminated rows sampled from the first page of each mapping. Divide the estimate among shards, cap speculative bytes against the input size, and retain normal Vec growth for skew.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user32 | 0.573 / 4.218 | 0.046 / 0.320 | 0.123 / 0.871 | 0.239 / 1.768 | 0.364 / 2.630 | 0.071 / 0.433 | 0.001 / 0.002 | 1.534 / 10.324 | 3.38 |
+| reserve | 0.531 / 3.653 | 0.049 / 0.320 | 0.132 / 0.889 | 0.244 / 1.793 | 0.389 / 2.672 | 0.074 / 0.470 | 0.001 / 0.002 | 1.509 / 9.828 | 3.05 |
+
+**Kept.** Parse CPU and median wall fell with fewer reallocations. Peak RSS fell by 0.33 GiB.
+
+### R3-OWNER
+
+Route each parsed row to its final person owner using the immutable union directory and a 2,048-entry per-chunk exact alias cache. Intern unresolved singleton names at the receiving owner. Each accepted record then converts to a person row in its existing partition.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.904 / 5.030 | 0.075 / 0.306 | 0.210 / 1.130 | 0.417 / 2.484 | 0.561 / 3.264 | 0.113 / 0.537 | 0.002 / 0.003 | 2.386 / 13.099 | 3.06 |
+| owner | 2.218 / 14.710 | 0.075 / 0.318 | 0.246 / 1.203 | 0.099 / 0.570 | 0.661 / 3.797 | 0.120 / 0.566 | 0.001 / 0.002 | 3.584 / 21.603 | 3.03 |
+
+**Reverted.** Resolve became cheaper, but global alias probes in the parse loop cost far more. This directly tests the cost of introducing per-row random interning lookups into the parser.
+
+### R3-INGEST
+
+Specialize the guaranteed-valid F1 ingest path using the cached date and fixed clock digits.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.558 / 3.840 | 0.055 / 0.344 | 0.144 / 0.992 | 0.278 / 2.011 | 0.401 / 2.742 | 0.076 / 0.491 | 0.001 / 0.002 | 1.572 / 10.362 | 3.10 |
+| ingest | 0.544 / 3.792 | 0.047 / 0.291 | 0.141 / 0.945 | 0.305 / 2.256 | 0.394 / 2.901 | 0.088 / 0.552 | 0.001 / 0.002 | 1.659 / 11.065 | 3.07 |
+
+**Reverted.** Parse showed only a small reduction and the locked end-to-end median rose.
+
+### R3-EPOCH
+
+For nine to sixteen decimal epoch digits, validate two overlapping words and combine four decimal pairs at a time. Other lengths retain the scalar parser.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.529 / 3.651 | 0.050 / 0.330 | 0.127 / 0.844 | 0.247 / 1.804 | 0.364 / 2.566 | 0.072 / 0.447 | 0.001 / 0.002 | 1.491 / 9.751 | 3.05 |
+| epoch | 0.524 / 3.662 | 0.048 / 0.289 | 0.136 / 0.928 | 0.250 / 1.827 | 0.402 / 2.795 | 0.079 / 0.492 | 0.001 / 0.002 | 1.541 / 10.119 | 3.07 |
+
+**Reverted.** Parse CPU was unchanged and end-to-end wall rose.
+
+### R3-HOT
+
+Cache recent exact packed aliases and canonical roots in 2,048 direct-mapped entries per user shard.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.556 / 3.846 | 0.045 / 0.285 | 0.136 / 0.918 | 0.245 / 1.763 | 0.398 / 2.732 | 0.080 / 0.534 | 0.001 / 0.002 | 1.594 / 10.478 | 3.05 |
+| hot | 0.547 / 3.803 | 0.048 / 0.318 | 0.122 / 0.819 | 0.249 / 1.809 | 0.372 / 2.702 | 0.080 / 0.489 | 0.001 / 0.003 | 1.558 / 10.170 | 3.05 |
+
+**Reverted.** The second locked series reversed the end-to-end result (1.588 → 1.625 s). Resolve got slower in both series, including 1.984 → 2.111 CPU-s on confirmation.
+
+### R3-DIMWORD
+
+Create a second exact catalog index for keys that fit into seven bytes plus length. Use a masked word load when all eight bytes are mapped.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reserve | 0.527 / 3.611 | 0.046 / 0.303 | 0.126 / 0.829 | 0.259 / 1.891 | 0.388 / 2.814 | 0.073 / 0.465 | 0.002 / 0.004 | 1.537 / 10.054 | 3.05 |
+| dims | 0.526 / 3.691 | 0.052 / 0.346 | 0.155 / 1.031 | 0.265 / 1.964 | 0.377 / 2.675 | 0.076 / 0.465 | 0.001 / 0.002 | 1.599 / 10.385 | 3.09 |
+
+**Reverted.** The extra index did not reduce parse time and increased end-to-end latency.
+
 ## Output experiments on the partition-local redesign
 
 Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hyperfine measures process start to exit, with a warmup, five measured runs, and fresh output files. CPU seconds include user and system time. The native correctness gate covers all 36 fixtures and both tables on dev, s2-200k, s3-3m, s4-10m and s5-20m.
