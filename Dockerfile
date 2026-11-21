@@ -1,4 +1,7 @@
 FROM rust:1.90.0-slim-bookworm@sha256:64232e656c058f4468e8d024e990acff04f0fd5a5c0a88a574dc37773d7325c9 AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends make=4.3-4.1 \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/src ./src

@@ -9,12 +9,23 @@ mod tables;
 mod timing;
 
 use ahash::RandomState;
+use memmap2::UncheckedAdvice;
 use shopping_sessions::catalog::{Campaigns, Products, load_window, path};
 use shopping_sessions::csv::read_chunks;
 use shopping_sessions::time::{LOOKBACK_MS, Window};
 use std::error::Error;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use timing::{Stage, Timings};
+
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// jemalloc reads this pointer before main. The NUL-terminated string lives
+// for the entire process. The kernel may satisfy these hints with normal pages.
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: Option<&std::ffi::c_char> =
+    unsafe { c"thp:always,metadata_thp:always".as_ptr().as_ref() };
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut timer = Timings::new();
@@ -68,19 +79,39 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let people = links::resolve(directory, events, clicks, &hash, &chunks);
     timer.end(Stage::Resolve);
-    let (users, daily) = tables::aggregate(
+    let user_dir = output.join("user_daily");
+    let campaign_dir = output.join("campaign_daily");
+    std::fs::create_dir_all(&user_dir)?;
+    std::fs::create_dir_all(&campaign_dir)?;
+    // Output columns own their strings and numbers, so writers never read the
+    // inputs. Aggregation rarely does: long names and tied click IDs. Workers
+    // that finish early discard input page-table entries while others still
+    // aggregate. A later read faults the same immutable file bytes back in.
+    // The address-space lock is shared, so workers clear separate mappings
+    // concurrently, and exit only removes empty mappings.
+    let next_chunk = AtomicUsize::new(0);
+    let release = || {
+        loop {
+            let i = next_chunk.fetch_add(1, Ordering::Relaxed);
+            let Some(chunk) = chunks.get(i) else { break };
+            let _ = unsafe { chunk.unchecked_advise(UncheckedAdvice::DontNeed) };
+        }
+    };
+    let daily = tables::aggregate(
         &people.names,
         people.events,
         people.clicks,
         &chunks,
         &products,
         &campaigns,
+        window,
+        &user_dir,
+        &release,
     )?;
     timer.end(Stage::Aggregate);
-    tables::write(&output, &users, &daily)?;
+    tables::write_campaigns(&campaign_dir.join("part-0.parquet"), &daily)?;
     timer.end(Stage::Write);
     timer.print();
-    // All Parquet writers have closed successfully. The OS can reclaim the
-    // read-only mappings and bulk workspaces together at process exit.
+    // All writers have closed. The OS reclaims the remaining workspaces at exit.
     std::process::exit(0);
 }
