@@ -8,8 +8,8 @@ use shopping_sessions::aggregate::{
 };
 use shopping_sessions::catalog::{Campaigns, Products};
 use shopping_sessions::fastpq::{CampaignDaily, NullableStrings, Strings, UserDaily};
+use std::io;
 use std::path::Path;
-use std::{fs, io};
 
 use shopping_sessions::output::CampaignDay;
 use shopping_sessions::time::{DAY_MS, MAX_PRICE_CENTS, Window};
@@ -288,6 +288,9 @@ fn process_groups<T>(
     Ok(())
 }
 
+/// Each worker writes its own user file as soon as its shards finish, then
+/// calls `release` while other workers may still be aggregating.
+#[allow(clippy::too_many_arguments)]
 pub fn aggregate(
     names: &[Vec<Key>],
     events: Partitions<PersonRow<Event>>,
@@ -296,7 +299,9 @@ pub fn aggregate(
     products: &Products,
     campaigns: &Campaigns,
     window: Window,
-) -> Result<(Vec<UserColumns>, CampaignColumns)> {
+    user_dir: &Path,
+    release: &(impl Fn() + Sync),
+) -> Result<CampaignColumns> {
     const PRICE_BITS: u32 = (MAX_PRICE_CENTS as u32).ilog2() + 1;
     const PRICE_MASK: u32 = (1 << PRICE_BITS) - 1;
     // A compact event holds the exact window-relative millisecond and payload.
@@ -310,7 +315,8 @@ pub fn aggregate(
         .zip(clicks)
         .enumerate()
         .chunks(size)
-        .map(|parts| -> Result<_> {
+        .enumerate()
+        .map(|(part, parts)| -> Result<_> {
             let mut daily = UserColumns::default();
             let mut user_day = UserDay::default();
             let mut sort_scratch = Vec::new();
@@ -387,13 +393,14 @@ pub fn aggregate(
                     )?;
                 }
             }
-            Ok((daily, totals))
+            write_users(&user_dir.join(format!("part-{part}.parquet")), &daily)?;
+            drop(daily);
+            release();
+            Ok(totals)
         })
         .collect::<Result<_>>()?;
-    let mut users = Vec::with_capacity(parts.len());
     let mut all = CampaignDays::new();
-    for (daily, totals) in parts {
-        users.push(daily);
+    for totals in parts {
         totals.merge_into(&mut all);
     }
     let mut campaign = CampaignColumns::default();
@@ -407,28 +414,25 @@ pub fn aggregate(
         campaign.revenue_cents.push(x.revenue);
         campaign.assisted_sessions.push(x.assists);
     }
-    Ok((users, campaign))
+    Ok(campaign)
 }
 
-pub fn write(path: &Path, users: &[UserColumns], campaigns: &CampaignColumns) -> io::Result<()> {
-    let user_dir = path.join("user_daily");
-    let campaign_dir = path.join("campaign_daily");
-    fs::create_dir_all(&user_dir)?;
-    fs::create_dir_all(&campaign_dir)?;
-    users.par_iter().enumerate().try_for_each(|(i, batch)| {
-        UserDaily {
-            user_id: batch.user_id.strings()?,
-            day: &batch.day,
-            sessions: &batch.sessions,
-            events: &batch.events,
-            revenue_cents: &batch.revenue_cents,
-            top_category: NullableStrings {
-                values: batch.top_category.strings()?,
-                validity: &batch.category_validity,
-            },
-        }
-        .write(&user_dir.join(format!("part-{i}.parquet")))
-    })?;
+fn write_users(path: &Path, batch: &UserColumns) -> io::Result<()> {
+    UserDaily {
+        user_id: batch.user_id.strings()?,
+        day: &batch.day,
+        sessions: &batch.sessions,
+        events: &batch.events,
+        revenue_cents: &batch.revenue_cents,
+        top_category: NullableStrings {
+            values: batch.top_category.strings()?,
+            validity: &batch.category_validity,
+        },
+    }
+    .write(path)
+}
+
+pub fn write_campaigns(path: &Path, campaigns: &CampaignColumns) -> io::Result<()> {
     CampaignDaily {
         campaign_id: campaigns.campaign_id.strings()?,
         channel: campaigns.channel.strings()?,
@@ -438,5 +442,5 @@ pub fn write(path: &Path, users: &[UserColumns], campaigns: &CampaignColumns) ->
         revenue_cents: &campaigns.revenue_cents,
         assisted_sessions: &campaigns.assisted_sessions,
     }
-    .write(&campaign_dir.join("part-0.parquet"))
+    .write(path)
 }
