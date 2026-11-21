@@ -93,3 +93,5 @@ Native measurements use release builds with x86-64-v3, NCPU=8 and CPUs 0–7. Hy
 | ID | Change | Correctness | Native 20M median wall / CPU | Disposition |
 | --- | --- | --- | --- | --- |
 | R3-OUT-1 | Emit contiguous strings, nullable bitmap and numeric columns for fastpq. Write one uncompressed PLAIN user file per worker batch and one campaign file. | 36/36 and five MATCHes | 2.035 s / 13.492 CPU-s vs main 2.218 s / 14.444 CPU-s. Separate five-run writer timing was 0.024 s. | Kept |
+| R3-OUT-2 | Request transparent huge pages for glibc allocations at startup with `glibc.malloc.hugetlb=1`. | Same writer and session implementation as R3-OUT-1. | 3.897 s / 15.248 CPU-s on the shared host. Median last timing line to waitpid was 0.159 s vs 0.128 s for R3-OUT-1. | Reverted |
+| R3-OUT-3 | Discard read-only link and event page-table entries on a scoped thread during aggregation. Long names can fault back from immutable files. | 36/36 and five MATCHes | Alternating five-run medians 3.482 s / 14.533 CPU-s vs 2.596 s / 14.147 CPU-s for R3-OUT-1 under variable concurrent load. | Reverted |
