@@ -283,3 +283,16 @@ Reduce user/person fanout from 256 to 32 to shorten the parse write frontier. Th
 | user32 | 0.826 / 4.329 | 0.080 / 0.261 | 0.221 / 0.880 | 0.458 / 2.085 | 0.624 / 2.642 | 0.146 / 0.478 | 0.003 / 0.002 | 2.649 / 10.913 | 3.37 |
 
 **Kept.** Both five-pair series improved end-to-end wall on this host. Pooled medians were 2.678 → 2.648 s. Resolve CPU increased in both series. The next experiment removes its second directory lookup.
+
+### R3-ROOTVALUE
+
+After union, replace each alias table value with its canonical global person ID so successful lookups return the root without consulting a separate root array.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| user32 | 0.838 / 4.516 | 0.048 / 0.265 | 0.268 / 0.897 | 0.553 / 2.054 | 0.684 / 2.775 | 0.135 / 0.473 | 0.001 / 0.002 | 2.716 / 11.127 | 3.34 |
+| rootvalue | 1.032 / 4.682 | 0.055 / 0.259 | 0.297 / 0.941 | 0.497 / 2.139 | 0.598 / 2.753 | 0.131 / 0.508 | 0.003 / 0.002 | 2.771 / 11.418 | 3.31 |
+
+**Reverted.** Resolve wall fell, but resolve CPU and end-to-end median rose.
