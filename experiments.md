@@ -151,3 +151,16 @@ Use dense partition-local person IDs for a counting scatter of events and clicks
 | grouped | 0.852 / 6.251 | 0.038 / 0.245 | 0.338 / 2.442 | 0.192 / 1.334 | 0.391 / 2.547 | 0.075 / 0.470 | 0.001 / 0.002 | 2.034 / 13.308 | 3.80 |
 
 **Kept.** Person ordering and aggregation used less CPU and wall time, and the end-to-end median improved.
+
+### R3-RADIX64
+
+Reduce initial record-ID radix fanout from 1,024 to 64 after adopting selective dedup. This tests a shorter active write frontier without copying the full streams in a separate pass.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| grouped | 0.809 / 5.934 | 0.052 / 0.329 | 0.341 / 2.405 | 0.185 / 1.285 | 0.398 / 2.557 | 0.081 / 0.529 | 0.001 / 0.002 | 2.043 / 13.330 | 3.82 |
+| coarse | 0.684 / 4.968 | 0.038 / 0.242 | 0.402 / 3.015 | 0.185 / 1.302 | 0.393 / 2.585 | 0.079 / 0.515 | 0.001 / 0.002 | 1.939 / 12.722 | 3.69 |
+
+**Kept.** The lower parse cost outweighed the larger partition-local candidate tables. Calibration scored 2.28 s on the board. The local native target is about 0.85 s.
