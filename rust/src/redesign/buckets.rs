@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const IDS: usize = 64;
-pub const USERS: usize = 32;
+pub const USERS: usize = 128;
 pub type Runs<T> = Vec<Vec<T>>;
 pub type Partitions<T> = Vec<Runs<T>>;
 

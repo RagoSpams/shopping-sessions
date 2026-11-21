@@ -425,3 +425,16 @@ Batch 32 row hashes and prefetch the corresponding exact linear alias slots befo
 | prefetch | 0.555 / 3.927 | 0.048 / 0.312 | 0.139 / 0.936 | 0.201 / 1.423 | 0.395 / 2.629 | 0.073 / 0.451 | 0.001 / 0.002 | 1.514 / 9.781 | 3.06 |
 
 **Kept.** Batched probing lowered both resolve CPU and wall and improved the full-process median.
+
+### R3-USERS128
+
+Increase the user fanout from 32 to 128 after introducing batched linear alias probes, reducing the working set of each active directory.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| prefetch | 0.678 / 4.292 | 0.051 / 0.305 | 0.170 / 0.940 | 0.273 / 1.592 | 0.443 / 2.740 | 0.089 / 0.467 | 0.001 / 0.002 | 1.829 / 10.503 | 3.07 |
+| user128 | 0.590 / 4.157 | 0.047 / 0.288 | 0.149 / 0.960 | 0.170 / 1.270 | 0.383 / 2.574 | 0.086 / 0.556 | 0.001 / 0.002 | 1.559 / 9.743 | 3.13 |
+
+**Kept.** The smaller directories reduced resolve CPU and end-to-end wall.
