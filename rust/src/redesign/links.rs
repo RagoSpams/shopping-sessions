@@ -218,9 +218,8 @@ pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap]) -> Vec<Directory> {
     dirs
 }
 
-pub struct PeopleRows<E, C> {
+pub struct ResolvedClicks<C> {
     pub names: Vec<Vec<Key>>,
-    pub events: Partitions<PersonRow<E>>,
     pub clicks: Partitions<PersonRow<C>>,
 }
 
@@ -336,8 +335,16 @@ fn deliver<T>(parts: &mut Partitions<PersonRow<T>>, forwards: Vec<Vec<Vec<Person
 
 /// Directories after their partitions' events have been resolved.
 pub struct ResolvedEvents<E> {
-    dirs: Vec<Directory>,
-    events: Partitions<PersonRow<E>>,
+    pub dirs: Vec<Directory>,
+    pub events: Partitions<PersonRow<E>>,
+}
+
+impl<E> ResolvedEvents<E> {
+    /// Each partition's person count so far; later clicks may add people
+    /// who have no events.
+    pub fn people(&self) -> Vec<usize> {
+        self.dirs.iter().map(|dir| dir.names.len()).collect()
+    }
 }
 
 /// Resolve events first, so click deduplication can run alongside.
@@ -373,16 +380,15 @@ pub fn resolve_events<E: Candidate>(
     }
 }
 
-pub fn resolve_clicks<E, C: Candidate>(
-    resolved: ResolvedEvents<E>,
+pub fn resolve_clicks<C: Candidate>(
+    dirs: Vec<Directory>,
     mut clicks: Vec<Batch<C>>,
     state: &RandomState,
     chunks: &[Mmap],
-) -> PeopleRows<E, C> {
+) -> ResolvedClicks<C> {
     let click_runs = take_runs(&mut clicks);
     drop(clicks);
-    let converted: Vec<_> = resolved
-        .dirs
+    let converted: Vec<_> = dirs
         .into_par_iter()
         .zip(click_runs)
         .enumerate()
@@ -400,9 +406,8 @@ pub fn resolve_clicks<E, C: Candidate>(
         forwards.push(f);
     }
     deliver(&mut parts, forwards);
-    PeopleRows {
+    ResolvedClicks {
         names,
-        events: resolved.events,
         clicks: parts,
     }
 }

@@ -226,7 +226,7 @@ pub struct CampaignColumns {
     assisted_sessions: Vec<i64>,
 }
 
-struct Groups<T> {
+pub struct Groups<T> {
     rows: Vec<T>,
     ends: Vec<usize>,
 }
@@ -420,12 +420,28 @@ fn process_groups<T, C>(
     Ok(())
 }
 
+/// Group each partition's events by person in time order. This needs no
+/// clicks, so it runs beside click resolution.
+pub fn order_events<E: EventRows>(
+    events: Partitions<PersonRow<E>>,
+    people: &[usize],
+) -> Vec<Groups<E::Sorted>> {
+    events
+        .into_par_iter()
+        .zip(people)
+        .map(|(runs, &people)| {
+            let mut scratch = Vec::new();
+            order_people(runs, people, E::sorted, |rows| E::sort(rows, &mut scratch))
+        })
+        .collect()
+}
+
 /// Each worker writes its own user file as soon as its shards finish, then
 /// calls `release` while other workers may still be aggregating.
 #[allow(clippy::too_many_arguments)]
 pub fn aggregate<E: EventRows, C: ClickRows>(
     names: &[Vec<Key>],
-    events: Partitions<PersonRow<E>>,
+    events: Vec<Groups<E::Sorted>>,
     clicks: Partitions<PersonRow<C>>,
     chunks: &[Mmap],
     products: &Products,
@@ -441,8 +457,7 @@ pub fn aggregate<E: EventRows, C: ClickRows>(
     let parallelism = rayon::current_num_threads().min(USERS);
     // Workers claim the largest remaining shard first to balance the finish.
     let mut order: Vec<_> = (0..events.len()).collect();
-    order
-        .sort_by_key(|&shard| std::cmp::Reverse(events[shard].iter().map(Vec::len).sum::<usize>()));
+    order.sort_by_key(|&shard| std::cmp::Reverse(events[shard].rows.len()));
     let shards: Vec<_> = events
         .into_iter()
         .zip(clicks)
@@ -462,11 +477,10 @@ pub fn aggregate<E: EventRows, C: ClickRows>(
                 ..UserColumns::default()
             };
             let mut user_day = UserDay::default();
-            let mut sort_scratch = Vec::new();
             let mut totals = Totals::new(window, campaigns.values.len());
             let mut attribution = Attribution::new(chunks, campaigns.values.len());
             for (shard, (events, clicks)) in parts {
-                if events.is_empty() {
+                if events.rows.is_empty() {
                     continue;
                 }
                 let people = names[shard].len();
@@ -497,9 +511,6 @@ pub fn aggregate<E: EventRows, C: ClickRows>(
                     daily.top_category.push(top);
                     Ok(())
                 };
-                let events = order_people(events, people, E::sorted, |rows| {
-                    E::sort(rows, &mut sort_scratch)
-                });
                 let event = |row: &E::Sorted| E::event(row, window);
                 let clicks = order_people(clicks, people, |c| c, C::sort);
                 process_groups(

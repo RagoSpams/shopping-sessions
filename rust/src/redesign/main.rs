@@ -159,7 +159,13 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
         || links::resolve_events(directory, events, hash, chunks),
     );
     timer.end(Stage::Dedup);
-    let people = links::resolve_clicks(resolved, clicks, hash, chunks);
+    // Event ordering for aggregation needs no clicks either.
+    let people = resolved.people();
+    let links::ResolvedEvents { dirs, events } = resolved;
+    let (resolved, events) = rayon::join(
+        || links::resolve_clicks(dirs, clicks, hash, chunks),
+        || tables::order_events::<E>(events, &people),
+    );
     timer.end(Stage::Resolve);
     let user_dir = output.join("user_daily");
     let campaign_dir = output.join("campaign_daily");
@@ -179,10 +185,10 @@ fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tabl
             let _ = unsafe { chunk.unchecked_advise(UncheckedAdvice::DontNeed) };
         }
     };
-    let daily = tables::aggregate(
-        &people.names,
-        people.events,
-        people.clicks,
+    let daily = tables::aggregate::<E, C>(
+        &resolved.names,
+        events,
+        resolved.clicks,
         chunks,
         products,
         campaigns,
