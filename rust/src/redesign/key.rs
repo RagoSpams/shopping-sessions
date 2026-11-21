@@ -44,30 +44,40 @@ const MAPPED: u64 = 1 << 63;
 const ASCII: u64 = 0x7f7f_7f7f_7f7f_7f7f;
 
 impl PackedKey {
+    /// The packed word of a short ASCII value, if it has one.
+    #[inline]
+    pub fn word(value: &[u8]) -> Option<u64> {
+        if value.len() > 9 {
+            return None;
+        }
+        let (first, last) = if value.len() >= 8 {
+            (
+                u64::from_le_bytes(value[..8].try_into().unwrap()),
+                value.get(8).copied().unwrap_or(0),
+            )
+        } else {
+            let mut bytes = [0; 8];
+            bytes[..value.len()].copy_from_slice(value);
+            (u64::from_le_bytes(bytes), 0)
+        };
+        if first & !ASCII != 0 || last >= 128 || value.last() == Some(&0) {
+            return None;
+        }
+        #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
+        let packed = unsafe { std::arch::x86_64::_pext_u64(first, ASCII) };
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
+        let packed = first
+            .to_le_bytes()
+            .iter()
+            .enumerate()
+            .fold(0, |word, (i, &b)| word | (u64::from(b) << (7 * i)));
+        Some(packed | (u64::from(last) << 56))
+    }
+
     #[inline]
     pub fn new(value: &[u8], chunk: &[u8], chunk_id: usize) -> Self {
-        if value.len() <= 9 {
-            let (first, last) = if value.len() >= 8 {
-                (
-                    u64::from_le_bytes(value[..8].try_into().unwrap()),
-                    value.get(8).copied().unwrap_or(0),
-                )
-            } else {
-                let mut bytes = [0; 8];
-                bytes[..value.len()].copy_from_slice(value);
-                (u64::from_le_bytes(bytes), 0)
-            };
-            if first & !ASCII == 0 && last < 128 && value.last() != Some(&0) {
-                #[cfg(all(target_arch = "x86_64", target_feature = "bmi2"))]
-                let packed = unsafe { std::arch::x86_64::_pext_u64(first, ASCII) };
-                #[cfg(not(all(target_arch = "x86_64", target_feature = "bmi2")))]
-                let packed = first
-                    .to_le_bytes()
-                    .iter()
-                    .enumerate()
-                    .fold(0, |word, (i, &b)| word | (u64::from(b) << (7 * i)));
-                return Self(packed | (u64::from(last) << 56));
-            }
+        if let Some(word) = Self::word(value) {
+            return Self(word);
         }
         let offset = u32::try_from(value.as_ptr() as usize - chunk.as_ptr() as usize).unwrap();
         // Linux limits the number of live mappings to a signed int.
@@ -95,7 +105,10 @@ impl PackedKey {
     #[inline]
     pub fn hash(self, state: &RandomState, chunks: &[Mmap]) -> u64 {
         if self.0 & MAPPED == 0 {
-            state.hash_one(self.0)
+            // One folded 64x64-bit product mixes every input bit into both
+            // halves. Packed and mapped forms never denote the same string.
+            let product = u128::from(self.0 ^ 0x2d35_8dcc_aa6c_78a5) * 0x8bb8_4b93_962e_acc9;
+            (product as u64) ^ ((product >> 64) as u64)
         } else {
             state.hash_one(self.mapped(chunks).0)
         }

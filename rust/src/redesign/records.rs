@@ -1,5 +1,6 @@
 use crate::buckets::{self, IDS, USERS, bucket};
 use crate::calendar::Calendar;
+use crate::dims::Dimension;
 use crate::key::PackedKey;
 use crate::scan::rows;
 use ahash::RandomState;
@@ -101,6 +102,7 @@ pub fn parse_events(
     products: &Products,
 ) -> Vec<Batch<Event>> {
     let expected = rows_per_worker::<Event>(chunks, range.clone());
+    let products = Dimension::new(&products.ids, products.unknown);
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
@@ -119,15 +121,7 @@ pub fn parse_events(
                     b"view" | b"cart" => (0, 0, true),
                     b"purchase" => {
                         let price = bounded_uint(price, MAX_PRICE_CENTS).unwrap_or(0) as u32;
-                        (
-                            price,
-                            products
-                                .ids
-                                .get(product)
-                                .copied()
-                                .unwrap_or(products.unknown),
-                            price != 0,
-                        )
+                        (price, products.get(product), price != 0)
                     }
                     _ => (0, 0, false),
                 };
@@ -170,6 +164,7 @@ pub fn parse_clicks(
     campaigns: &Campaigns,
 ) -> Vec<Batch<Click>> {
     let expected = rows_per_worker::<Click>(chunks, range.clone());
+    let campaigns = Dimension::new(&campaigns.ids, 0);
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
@@ -182,7 +177,7 @@ pub fn parse_clicks(
                     continue;
                 }
                 let id = PackedKey::new(id, chunk, i);
-                let campaign = campaigns.ids.get(campaign).copied().unwrap_or(0);
+                let campaign = campaigns.get(campaign);
                 let time = if !user.is_empty() && campaign != 0 {
                     calendar.timestamp(window, ts).unwrap_or(INVALID)
                 } else {

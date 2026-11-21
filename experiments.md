@@ -464,3 +464,16 @@ Carry the event ID and ingest time (or the click ID) in the ID-partition ticket,
 | inplace | 0.537 / 3.845 | 0.046 / 0.279 | 0.098 / 0.697 | 0.110 / 0.850 | 0.328 / 2.359 | 0.077 / 0.482 | 0.001 / 0.002 | 1.300 / 8.570 | 2.99 |
 
 **Kept.** Resolve fell from 0.197 to 0.110 s and dedup from 0.124 to 0.098 s, with lower parse and aggregate medians and 0.15 GiB lower peak RSS. A routed variant that sent rows to their person's owner during parse through a 4-byte hint table needed no forwarding but cost 0.15–0.3 s more parse time, even with huge pages and a prefetch ring; without hints, 35% of rows move between partitions.
+
+### R3-FIELDS
+
+Decode hot fields with fewer branches and lookups: an exact open-addressing catalog index compares product and campaign names that pack into one word as integers (other names use the catalog's byte map); packed keys hash with one folded 64x64-bit product instead of the keyed hasher; thirteen-digit F3 timestamps convert with two overlapping eight-digit SWAR words, while other lengths keep the general parser.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| inplace | 0.724 / 4.466 | 0.061 / 0.312 | 0.128 / 0.720 | 0.148 / 1.045 | 0.502 / 2.901 | 0.088 / 0.551 | 0.002 / 0.003 | 1.804 / 10.238 | 2.99 |
+| fields | 0.557 / 3.901 | 0.053 / 0.321 | 0.101 / 0.699 | 0.130 / 0.937 | 0.393 / 2.885 | 0.086 / 0.549 | 0.001 / 0.002 | 1.438 / 9.108 | 2.99 |
+
+**Kept.** CPU-seconds were lower in all five pairs (median 9.108 vs 10.238). Wall medians were 1.438 vs 1.804 s; the first two pairs ran under heavy external load (2.35–2.56 s for both builds), and three of five pairs favored the new build. New unit tests compare the SWAR path with the general parser under every single-byte mutation of five thirteen-digit values and check both window bounds, and check the catalog index against the byte map, including long, non-ASCII and NUL-terminated names.
