@@ -52,11 +52,3 @@ pub fn transpose<T>(batches: Vec<Vec<Vec<T>>>, count: usize) -> Partitions<T> {
     }
     out
 }
-
-pub fn flatten<T>(runs: Runs<T>) -> Vec<T> {
-    let mut out = Vec::with_capacity(runs.iter().map(Vec::len).sum());
-    for run in runs {
-        out.extend(run);
-    }
-    out
-}

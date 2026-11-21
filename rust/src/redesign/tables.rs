@@ -1,4 +1,4 @@
-use crate::buckets::{self, Partitions, USERS};
+use crate::buckets::{Partitions, Runs, USERS};
 use crate::key::Key;
 use memmap2::Mmap;
 use parquet::errors::Result;
@@ -30,6 +30,41 @@ pub struct CampaignColumns<'a> {
     pub assisted_sessions: Vec<i64>,
 }
 
+// Local person IDs already form a dense range. Count into that range once,
+// then sort timestamps only within each person's rows.
+fn order_by_person<T>(
+    runs: Runs<PersonRow<T>>,
+    people: usize,
+    time: impl Fn(&T) -> i64,
+) -> Vec<PersonRow<T>> {
+    let mut offsets = vec![0; people];
+    for row in runs.iter().flatten() {
+        offsets[row.person as usize] += 1;
+    }
+    let mut count = 0;
+    for offset in &mut offsets {
+        let length = *offset;
+        *offset = count;
+        count += length;
+    }
+    let mut ordered: Vec<PersonRow<T>> = Vec::with_capacity(count);
+    let slots = ordered.spare_capacity_mut();
+    for row in runs.into_iter().flatten() {
+        let next = &mut offsets[row.person as usize];
+        slots[*next].write(row);
+        *next += 1;
+    }
+    // The prefix sums assigned disjoint ranges covering 0..count. The scatter
+    // consumed exactly the rows counted above, initializing each slot once.
+    unsafe { ordered.set_len(count); }
+    let mut start = 0;
+    for end in offsets {
+        ordered[start..end].sort_unstable_by_key(|row| time(&row.data));
+        start = end;
+    }
+    ordered
+}
+
 pub fn aggregate<'a>(
     names: &'a [Vec<Key>],
     events: Partitions<PersonRow<Event>>,
@@ -53,10 +88,9 @@ pub fn aggregate<'a>(
                 if events.is_empty() {
                     continue;
                 }
-                let mut events = buckets::flatten(events);
-                let mut clicks = buckets::flatten(clicks);
-                events.sort_unstable_by_key(|row| (row.person, row.data.time));
-                clicks.sort_unstable_by_key(|row| (row.person, row.data.time));
+                let people = names[shard].len();
+                let events = order_by_person(events, people, |event| event.time);
+                let clicks = order_by_person(clicks, people, |click| click.time);
                 aggregate::process(
                     |id, day, sessions, count, revenue, top| {
                         daily.user_id.push(names[shard][id as usize].bytes(chunks));

@@ -138,3 +138,16 @@ Within each existing ID partition, a bit seen just once proves the row unique. A
 | filter | 0.922 / 6.799 | 0.041 / 0.265 | 0.405 / 2.930 | 0.222 / 1.542 | 0.511 / 3.383 | 0.090 / 0.580 | 0.001 / 0.002 | 2.385 / 15.826 | 3.82 |
 
 **Kept.** The smaller winner tables reduced dedup CPU and end-to-end time.
+
+### R3-GROUP
+
+Use dense partition-local person IDs for a counting scatter of events and clicks. Sort timestamps within each resulting person range before sessionization and attribution.
+
+36/36 fixtures. Both tables MATCH on dev, s2-200k, s3-3m, s4-10m and s5-20m. Five alternating 20M Hyperfine pairs, one warmup per binary. Cells show median wall seconds / CPU-seconds.
+
+| Build | Parse | Links | Dedup | Resolve | Sessions + aggregate | Parquet | Setup | End to end | RSS GiB |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| filter | 0.806 / 5.919 | 0.040 / 0.251 | 0.336 / 2.400 | 0.190 / 1.287 | 0.452 / 2.968 | 0.079 / 0.479 | 0.001 / 0.002 | 2.063 / 13.486 | 3.80 |
+| grouped | 0.852 / 6.251 | 0.038 / 0.245 | 0.338 / 2.442 | 0.192 / 1.334 | 0.391 / 2.547 | 0.075 / 0.470 | 0.001 / 0.002 | 2.034 / 13.308 | 3.80 |
+
+**Kept.** Person ordering and aggregation used less CPU and wall time, and the end-to-end median improved.
