@@ -9,14 +9,14 @@ mod tables;
 mod timing;
 
 use ahash::RandomState;
+use memmap2::Mmap;
 use memmap2::UncheckedAdvice;
 use shopping_sessions::catalog::{Campaigns, Products, load_window, path};
 use shopping_sessions::csv::read_chunks;
 use shopping_sessions::time::{LOOKBACK_MS, Window};
-use memmap2::Mmap;
 use std::error::Error;
-use std::path::Path;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use timing::{Stage, Timings};
 
@@ -84,11 +84,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         campaign_index: &campaign_index,
         output: &output,
     };
-    // Events travel as one sortable word whenever the window and catalog fit.
-    if records::PackedEvent::fits(window, products.categories.len()) {
-        run::<records::PackedEvent>(inputs, directory, &mut timer)?;
-    } else {
-        run::<shopping_sessions::aggregate::Event>(inputs, directory, &mut timer)?;
+    // Events and clicks travel as sortable words whenever their windows and
+    // the catalog fit.
+    use records::{PackedClick, PackedEvent};
+    use shopping_sessions::aggregate::{Click, Event};
+    let packed_events = PackedEvent::fits(window, products.categories.len());
+    let packed_clicks = PackedClick::fits(Window {
+        start: window.start - LOOKBACK_MS,
+        end: window.end,
+    });
+    match (packed_events, packed_clicks) {
+        (true, true) => run::<PackedEvent, PackedClick>(inputs, directory, &mut timer)?,
+        (true, false) => run::<PackedEvent, Click>(inputs, directory, &mut timer)?,
+        (false, true) => run::<Event, PackedClick>(inputs, directory, &mut timer)?,
+        (false, false) => run::<Event, Click>(inputs, directory, &mut timer)?,
     }
     timer.print();
     // All writers have closed. The OS reclaims the remaining workspaces at exit.
@@ -108,7 +117,7 @@ struct Inputs<'a> {
     output: &'a Path,
 }
 
-fn run<E: records::EventCodec + tables::EventRows>(
+fn run<E: records::EventCodec + tables::EventRows, C: records::ClickCodec + tables::ClickRows>(
     inputs: Inputs<'_>,
     directory: Vec<links::Directory>,
     timer: &mut Timings,
@@ -136,7 +145,7 @@ fn run<E: records::EventCodec + tables::EventRows>(
         start: window.start - LOOKBACK_MS,
         end: window.end,
     };
-    let click_index = records::parse_clicks(
+    let click_index = records::parse_clicks::<C>(
         chunks,
         events_end..chunks.len(),
         hash,

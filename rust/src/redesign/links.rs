@@ -5,7 +5,7 @@ use crate::scan::rows;
 use ahash::RandomState;
 use memmap2::Mmap;
 use rayon::prelude::*;
-use shopping_sessions::aggregate::{Click, PersonRow};
+use shopping_sessions::aggregate::PersonRow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -218,10 +218,10 @@ pub fn build(batches: Vec<LinkBatch>, chunks: &[Mmap]) -> Vec<Directory> {
     dirs
 }
 
-pub struct PeopleRows<E> {
+pub struct PeopleRows<E, C> {
     pub names: Vec<Vec<Key>>,
     pub events: Partitions<PersonRow<E>>,
-    pub clicks: Partitions<PersonRow<Click>>,
+    pub clicks: Partitions<PersonRow<C>>,
 }
 
 impl Directory {
@@ -334,13 +334,13 @@ fn deliver<T>(parts: &mut Partitions<PersonRow<T>>, forwards: Vec<Vec<Vec<Person
     }
 }
 
-pub fn resolve<E: Candidate>(
+pub fn resolve<E: Candidate, C: Candidate>(
     dirs: Vec<Directory>,
     mut events: Vec<Batch<E>>,
-    mut clicks: Vec<Batch<Click>>,
+    mut clicks: Vec<Batch<C>>,
     state: &RandomState,
     chunks: &[Mmap],
-) -> PeopleRows<E> {
+) -> PeopleRows<E, C> {
     let event_runs = take_runs(&mut events);
     let click_runs = take_runs(&mut clicks);
     drop((events, clicks));

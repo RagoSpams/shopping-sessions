@@ -47,6 +47,71 @@ impl Candidate for Click {
     }
 }
 
+/// A click as one sortable word, the click-window-relative millisecond above
+/// the campaign, plus the row location that supplies its ID for ties.
+/// Campaign 0 is organic and never belongs to a valid click, so a zero
+/// campaign field marks a row that cannot survive.
+#[derive(Clone, Copy)]
+pub struct PackedClick {
+    pub word: u64,
+    pub location: Location,
+}
+
+impl PackedClick {
+    /// True when every valid click of this window packs losslessly.
+    pub fn fits(window: Window) -> bool {
+        window.end - window.start <= i64::from(u32::MAX) + 1
+    }
+
+    #[inline]
+    pub fn decode(self, window: Window) -> Click {
+        Click {
+            time: window.start + (self.word >> 32) as i64,
+            campaign: self.word as u32,
+            location: self.location,
+        }
+    }
+}
+
+impl Candidate for PackedClick {
+    fn discard(&mut self) {
+        self.word &= !u64::from(u32::MAX);
+    }
+    fn valid(&self) -> bool {
+        self.word as u32 != 0
+    }
+}
+
+/// The payload a parsed click row carries until aggregation.
+pub trait ClickCodec: Candidate {
+    fn encode(window: Window, time: i64, campaign: u32, location: Location) -> Self;
+}
+
+impl ClickCodec for Click {
+    #[inline]
+    fn encode(_: Window, time: i64, campaign: u32, location: Location) -> Self {
+        Click {
+            time,
+            campaign,
+            location,
+        }
+    }
+}
+
+impl ClickCodec for PackedClick {
+    #[inline]
+    fn encode(window: Window, time: i64, campaign: u32, location: Location) -> Self {
+        if time == INVALID {
+            return Self { word: 0, location };
+        }
+        let offset = (time - window.start) as u64;
+        Self {
+            word: (offset << 32) | u64::from(campaign),
+            location,
+        }
+    }
+}
+
 pub const PRICE_BITS: u32 = (MAX_PRICE_CENTS as u32).ilog2() + 1;
 pub const PRICE_MASK: u32 = (1 << PRICE_BITS) - 1;
 
@@ -60,8 +125,7 @@ pub struct PackedEvent(pub u64);
 impl PackedEvent {
     /// True when every valid event of this input packs losslessly.
     pub fn fits(window: Window, categories: usize) -> bool {
-        window.end - window.start <= i64::from(u32::MAX) + 1
-            && categories <= 1 << (32 - PRICE_BITS)
+        window.end - window.start <= i64::from(u32::MAX) + 1 && categories <= 1 << (32 - PRICE_BITS)
     }
 
     #[inline]
@@ -201,14 +265,14 @@ pub fn parse_events<E: EventCodec>(
     batches.into_iter().flatten().collect()
 }
 
-pub fn parse_clicks(
+pub fn parse_clicks<C: ClickCodec>(
     chunks: &[Mmap],
     range: Range<usize>,
     hash: &RandomState,
     window: Window,
     campaigns: &Dimension,
-) -> Vec<Batch<Click>> {
-    let expected = rows_per_worker::<Click>(chunks, range.clone());
+) -> Vec<Batch<C>> {
+    let expected = rows_per_worker::<C>(chunks, range.clone());
     let batches = buckets::consume_chunks(
         range.start,
         range.len(),
@@ -237,11 +301,7 @@ pub fn parse_clicks(
                     bucket(user.hash(hash, chunks), USERS),
                     Record {
                         user,
-                        payload: Click {
-                            time,
-                            campaign,
-                            location: Location::new(i, offset),
-                        },
+                        payload: C::encode(window, time, campaign, Location::new(i, offset)),
                     },
                 );
             }

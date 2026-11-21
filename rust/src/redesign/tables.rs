@@ -1,6 +1,6 @@
 use crate::buckets::{Partitions, USERS};
 use crate::key::Key;
-use crate::records::PackedEvent;
+use crate::records::{PackedClick, PackedEvent};
 use memmap2::Mmap;
 use parquet::errors::{ParquetError, Result};
 use rayon::prelude::*;
@@ -14,7 +14,6 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use shopping_sessions::csv::Location;
 use shopping_sessions::output::CampaignDay;
 use shopping_sessions::time::{DAY_MS, LOOKBACK_MS, Window};
 
@@ -366,12 +365,31 @@ fn order_people<T, U: Copy>(
     Groups { rows, ends }
 }
 
-/// A click with its window-relative millisecond and campaign in one sortable
-/// word. Equal-time clicks need no order: attribution compares their IDs.
-#[derive(Clone, Copy)]
-struct PackedClick {
-    key: u64,
-    location: Location,
+/// Click payloads from resolution, sorted per person by time. Equal-time
+/// clicks need no order: attribution compares their IDs.
+pub trait ClickRows: Copy + Send + Sync {
+    fn sort(rows: &mut [Self]);
+    fn click(&self, window: Window) -> Click;
+}
+
+impl ClickRows for PackedClick {
+    fn sort(rows: &mut [Self]) {
+        rows.sort_unstable_by_key(|row| row.word);
+    }
+    #[inline]
+    fn click(&self, window: Window) -> Click {
+        self.decode(window)
+    }
+}
+
+impl ClickRows for Click {
+    fn sort(rows: &mut [Self]) {
+        rows.sort_unstable_by_key(|row| row.time);
+    }
+    #[inline]
+    fn click(&self, _: Window) -> Click {
+        *self
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,10 +423,10 @@ fn process_groups<T, C>(
 /// Each worker writes its own user file as soon as its shards finish, then
 /// calls `release` while other workers may still be aggregating.
 #[allow(clippy::too_many_arguments)]
-pub fn aggregate<E: EventRows>(
+pub fn aggregate<E: EventRows, C: ClickRows>(
     names: &[Vec<Key>],
     events: Partitions<PersonRow<E>>,
-    clicks: Partitions<PersonRow<Click>>,
+    clicks: Partitions<PersonRow<C>>,
     chunks: &[Mmap],
     products: &Products,
     campaigns: &Campaigns,
@@ -416,10 +434,10 @@ pub fn aggregate<E: EventRows>(
     user_dir: &Path,
     release: &(impl Fn() + Sync),
 ) -> Result<CampaignColumns> {
-    // Parsed clicks lie in [window start - lookback, window end). When that
-    // span fits in 32 bits, a click's time and campaign share one word.
-    let click_origin = window.start - LOOKBACK_MS;
-    let packed_clicks = window.end - click_origin <= i64::from(u32::MAX) + 1;
+    let click_window = Window {
+        start: window.start - LOOKBACK_MS,
+        end: window.end,
+    };
     let parallelism = rayon::current_num_threads().min(USERS);
     // Workers claim the largest remaining shard first to balance the finish.
     let mut order: Vec<_> = (0..events.len()).collect();
@@ -483,48 +501,17 @@ pub fn aggregate<E: EventRows>(
                     E::sort(rows, &mut sort_scratch)
                 });
                 let event = |row: &E::Sorted| E::event(row, window);
-                if packed_clicks {
-                    let clicks = order_people(
-                        clicks,
-                        people,
-                        |c| PackedClick {
-                            key: ((c.time - click_origin) as u64) << 32 | u64::from(c.campaign),
-                            location: c.location,
-                        },
-                        |rows| rows.sort_unstable_by_key(|c| c.key),
-                    );
-                    process_groups(
-                        &events,
-                        &clicks,
-                        event,
-                        |c| Click {
-                            time: click_origin + (c.key >> 32) as i64,
-                            campaign: c.key as u32,
-                            location: c.location,
-                        },
-                        &mut user_day,
-                        &mut attribution,
-                        &mut totals,
-                        &mut emit,
-                    )?;
-                } else {
-                    let clicks = order_people(
-                        clicks,
-                        people,
-                        |c| c,
-                        |rows| rows.sort_unstable_by_key(|c| c.time),
-                    );
-                    process_groups(
-                        &events,
-                        &clicks,
-                        event,
-                        |c| *c,
-                        &mut user_day,
-                        &mut attribution,
-                        &mut totals,
-                        &mut emit,
-                    )?;
-                }
+                let clicks = order_people(clicks, people, |c| c, C::sort);
+                process_groups(
+                    &events,
+                    &clicks,
+                    event,
+                    |c| c.click(click_window),
+                    &mut user_day,
+                    &mut attribution,
+                    &mut totals,
+                    &mut emit,
+                )?;
             }
             write_users(&user_dir.join(format!("part-{part}.parquet")), &daily)?;
             drop(daily);

@@ -90,9 +90,8 @@ fn eight_digits(bytes: [u8; 8]) -> Option<u64> {
         return None;
     }
     let pairs = digits.wrapping_mul(10).wrapping_add(digits >> 8);
-    let quads = (pairs & 0x00ff_00ff_00ff_00ff).wrapping_mul(1 + (100 << 16))
-        >> 16
-        & 0x0000_ffff_0000_ffff;
+    let quads =
+        (pairs & 0x00ff_00ff_00ff_00ff).wrapping_mul(1 + (100 << 16)) >> 16 & 0x0000_ffff_0000_ffff;
     Some((quads & 0xffff) * 10_000 + (quads >> 32))
 }
 
@@ -133,7 +132,10 @@ mod tests {
             b"1234567890123",
             b"0001791071890",
         ] {
-            assert_eq!(cache.timestamp(window, original), window.timestamp(original));
+            assert_eq!(
+                cache.timestamp(window, original),
+                window.timestamp(original)
+            );
             for position in 0..original.len() {
                 let mut value = original.to_vec();
                 for byte in 0..=255 {
